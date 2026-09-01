@@ -469,12 +469,19 @@
   }
 
   function geoLabel(c){
-    const type=c.geoType||"";
-    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return " Усы";
-    if(type==="europe") return " Радуга";
-    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
-    return "📍 Не указано";
+    const key=String(c?.geoCountry||"").toLowerCase();
+    const labels={
+      ru:"Классика",
+      by:"Усы",
+      eu:"Радуга",
+      other:"Иное",
+      russia:"Классика",
+      belarus:"Усы",
+      europe:"Радуга"
+    };
+    const base=labels[key]||labels[String(c?.geo||"").toLowerCase()]||"Иное";
+    const detail=String(c?.geoRegion||c?.geoDetail||c?.region||"").trim();
+    return detail?`${base} · ${detail}`:base;
   }
 
   function pipeline(c,mode="detail"){
