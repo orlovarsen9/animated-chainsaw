@@ -470,10 +470,10 @@
 
   function geoLabel(c){
     const type=c.geoType||"";
-    if(type==="russia") return `🇷🇺 Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return "🇧🇾 Усы";
-    if(type==="europe") return "🌈 Радуга";
-    if(type==="other") return `📍 Иное${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return " Усы";
+    if(type==="europe") return " Радуга";
+    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
     return "📍 Не указано";
   }
 
