@@ -65,6 +65,7 @@ function doPost(e) {
     if (action === "markMessageRead") return handleMarkMessageRead(body);
     if (action === "saveManagerSettings") return handleSaveManagerSettings(body);
     if (action === "saveChecklistItem") return handleSaveChecklistItem(body);
+    if (action === "updateManagerAccount") return handleUpdateManagerAccount(body);
     if (action === "deleteManager") return handleDeleteManager(body);
     if (action === "saveState") return handleSaveState(body);
     if (action === "logout") return handleLogout(body);
@@ -458,6 +459,71 @@ function handleSaveChecklistItem(body) {
 }
 
 
+
+function handleUpdateManagerAccount(body) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const state = loadState();
+    const user = requireUser(body.token, state);
+    if (!user || user.role !== "viewer") {
+      return jsonOut({ok:false,error:"Менять аккаунт менеджера может только наблюдатель"});
+    }
+
+    const managerId = String(body.managerId || "");
+    const manager = (state.users || []).find(function(u){
+      return u.id === managerId && u.role === "manager";
+    });
+    if (!manager) return jsonOut({ok:false,error:"Менеджер не найден"});
+
+    const name = String(body.name || "").trim();
+    const login = String(body.login || "").trim();
+    const password = String(body.password || "");
+    const avatar = String(body.avatar || "");
+
+    if (name.length < 2) return jsonOut({ok:false,error:"Имя слишком короткое"});
+    if (login.length < 3) return jsonOut({ok:false,error:"Логин слишком короткий"});
+    if (password && password.length < 6) return jsonOut({ok:false,error:"Пароль должен содержать минимум 6 символов"});
+    if (avatar.length > 3000000) return jsonOut({ok:false,error:"Картинка слишком большая"});
+
+    const duplicate = (state.users || []).some(function(u){
+      return u.id !== managerId && String(u.login || "").trim().toLowerCase() === login.toLowerCase();
+    });
+    if (duplicate) return jsonOut({ok:false,error:"Такой логин уже используется"});
+
+    manager.name = name;
+    manager.login = login;
+    manager.avatar = avatar;
+
+    if (password) {
+      // Текущая CRM хранит пароль в том же формате, что и существующие аккаунты.
+      // Если в проекте есть отдельный хешер, используем его.
+      if (typeof hashPassword === "function") {
+        manager.password = hashPassword(password);
+      } else if (typeof passwordHash === "function") {
+        manager.password = passwordHash(password);
+      } else {
+        manager.password = password;
+      }
+    }
+
+    state.audit = Array.isArray(state.audit) ? state.audit : [];
+    state.audit.push({
+      ts:new Date().toISOString(),
+      userId:user.id,
+      text:"Наблюдатель обновил аккаунт менеджера: " + name
+    });
+
+    saveState(state);
+    mirrorSheets(state);
+    SpreadsheetApp.flush();
+
+    return jsonOut({ok:true,state:sanitizeState(state)});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function handleDeleteManager(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -709,6 +775,19 @@ function purgeAlexander(state) {
   return {state:state,changed:true};
 }
 
+
+function applyProjectResetV56(state) {
+  state = state || {};
+  const props = PropertiesService.getScriptProperties();
+  const marker = "v56_projects_reset_001";
+  if (props.getProperty("DATA_RESET_VERSION") === marker) return {state:state,changed:false};
+  state.clients = [];
+  state.nextProjectNumber = 1;
+  state.projectCounter = 0;
+  props.setProperty("DATA_RESET_VERSION", marker);
+  return {state:state,changed:true};
+}
+
 function loadState() {
   const sh = getDataSheet();
   const last = sh.getLastRow();
@@ -733,12 +812,13 @@ function loadState() {
   try {
     const parsed = JSON.parse(text);
     const purged = purgeAlexander(parsed);
-    if (purged.changed) {
-      saveState(purged.state);
-      mirrorSheets(purged.state);
+    const reset = applyProjectResetV56(purged.state);
+    if (purged.changed || reset.changed) {
+      saveState(reset.state);
+      mirrorSheets(reset.state);
       SpreadsheetApp.flush();
     }
-    return purged.state;
+    return reset.state;
   } catch(e) {
     throw new Error("Не удалось прочитать общую базу CRM");
   }

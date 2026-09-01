@@ -630,3 +630,33 @@ html[data-theme="dark"] .sms-bubble{background:#202c3b;color:#f3f6fa}
   max-width:calc(100% - (100% / var(--count)));
 }
 
+
+
+/* v58 — редактирование аккаунта менеджера наблюдателем */
+.manager-account-card .form-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+.manager-account-card label{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.manager-account-card input{
+  width:100%;
+}
+.manager-avatar-edit-preview .manager-avatar{
+  width:58px;
+  height:58px;
+  flex:0 0 58px;
+}
+.manager-avatar-edit-preview .manager-avatar img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  border-radius:50%;
+}
+@media(max-width:700px){
+  .manager-account-card .form-grid{grid-template-columns:1fr}
+}

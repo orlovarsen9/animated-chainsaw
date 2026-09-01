@@ -1,6 +1,6 @@
 
 (() => {
-  const API_URL = "https://script.google.com/macros/s/AKfycbwroGcPCNj-t7JtbQ9xvIFJ_45Q7rGBVmKox1UShizh4lpAwbtvjnQj2JNsXank4UnjvQ/exec";
+  const API_URL = "https://script.google.com/macros/s/AKfycby5pCxJQoR5vki_VzpuvyDWF2J-qTCpUkgynWb06sUMnBySpOOJib1u7bMeKP8w9_BuUw/exec";
   const CACHE_KEY = "project_crm_shared_cache_v24";
   const sessionKey = "project_crm_shared_session_v24";
 
@@ -39,6 +39,12 @@
 
 
   let db = JSON.parse(JSON.stringify(seed));
+  // v56_projects_reset_001: одноразово очищаем старые проекты в браузере.
+  if(localStorage.getItem("citadel_reset_version")!=="v56_projects_reset_001"){
+    db.clients=[];
+    localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+    localStorage.setItem("citadel_reset_version","v56_projects_reset_001");
+  }
   let session = loadSession();
   let syncing = false;
   let realtimeTimer=null;
@@ -145,6 +151,21 @@
     }
   }
 
+  async function updateManagerAccountAtomic(managerId,payload){
+    const data=await api("updateManagerAccount",{
+      managerId,
+      name:payload.name,
+      login:payload.login,
+      password:payload.password,
+      avatar:payload.avatar
+    });
+    if(data.state){
+      db=data.state;
+      localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+    }
+    return data;
+  }
+
   async function saveManagerSettingsAtomic(managerId){
     const cfg=managerConfig(managerId);
     const payload={
@@ -188,6 +209,15 @@
       // Это также обеспечивает совместимость, если Apps Script ещё без нового action.
       return await syncRemote(false);
     }
+  }
+
+  function fileToDataUrl(file){
+    return new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(String(reader.result||""));
+      reader.onerror=()=>reject(reader.error||new Error("Не удалось прочитать изображение"));
+      reader.readAsDataURL(file);
+    });
   }
 
   async function fetchState(){
@@ -978,6 +1008,64 @@
         alert("Сообщение не отправилось: "+(e.message||e));
       }finally{
         sendBossMessage.disabled=false;
+      }
+    };
+
+
+    let pendingManagerAvatar=manager.avatar||"";
+    const managerAvatarFile=modal.querySelector("#managerAvatarFile");
+    const managerAvatarPreview=modal.querySelector("#managerAvatarPreview");
+    const removeManagerAvatar=modal.querySelector("#removeManagerAvatar");
+    const saveManagerAccount=modal.querySelector("#saveManagerAccount");
+
+    if(managerAvatarFile && canManageThesesAndBlocks) managerAvatarFile.onchange=async()=>{
+      const file=managerAvatarFile.files?.[0];
+      if(!file)return;
+      if(!String(file.type||"").startsWith("image/")){
+        alert("Выберите изображение");
+        managerAvatarFile.value="";
+        return;
+      }
+      if(file.size>2*1024*1024){
+        alert("Картинка должна быть не больше 2 МБ");
+        managerAvatarFile.value="";
+        return;
+      }
+      try{
+        pendingManagerAvatar=await fileToDataUrl(file);
+        if(managerAvatarPreview) managerAvatarPreview.innerHTML=`<img src="${pendingManagerAvatar}" alt="">`;
+      }catch(e){
+        alert("Не удалось загрузить картинку");
+      }
+    };
+
+    if(removeManagerAvatar && canManageThesesAndBlocks) removeManagerAvatar.onclick=()=>{
+      pendingManagerAvatar="";
+      if(managerAvatarFile) managerAvatarFile.value="";
+      if(managerAvatarPreview) managerAvatarPreview.textContent=(manager.name||"М").charAt(0).toUpperCase();
+    };
+
+    if(saveManagerAccount && canManageThesesAndBlocks) saveManagerAccount.onclick=async()=>{
+      const name=(modal.querySelector("#managerAccountName")?.value||"").trim();
+      const login=(modal.querySelector("#managerAccountLogin")?.value||"").trim();
+      const password=modal.querySelector("#managerAccountPassword")?.value||"";
+
+      if(name.length<2){alert("Имя должно содержать минимум 2 символа");return}
+      if(login.length<3){alert("Логин должен содержать минимум 3 символа");return}
+      if(password && password.length<6){alert("Новый пароль должен содержать минимум 6 символов");return}
+
+      saveManagerAccount.disabled=true;
+      const oldText=saveManagerAccount.textContent;
+      saveManagerAccount.textContent="Сохраняю...";
+      try{
+        const data=await updateManagerAccountAtomic(mid,{name,login,password,avatar:pendingManagerAvatar});
+        if(!data || data.ok===false) throw new Error(data?.error||"Сервер не подтвердил сохранение");
+        saveManagerAccount.textContent="Сохранено";
+        setTimeout(()=>{saveManagerAccount.disabled=false;saveManagerAccount.textContent=oldText;},700);
+      }catch(e){
+        saveManagerAccount.disabled=false;
+        saveManagerAccount.textContent=oldText;
+        alert("Не удалось сохранить аккаунт менеджера: "+(e.message||e));
       }
     };
 
