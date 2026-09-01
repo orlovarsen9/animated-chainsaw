@@ -469,17 +469,15 @@
   }
 
   function geoLabel(c){
-    const key=String(c?.geoCountry||"").toLowerCase();
+    const raw=String(c?.geoCountry||c?.geo||"").trim();
+    const key=raw.toLowerCase();
     const labels={
-      ru:"Классика",
-      by:"Усы",
-      eu:"Радуга",
-      other:"Иное",
-      russia:"Классика",
-      belarus:"Усы",
-      europe:"Радуга"
+      "ru":"Классика","russia":"Классика","россия":"Классика","классика":"Классика","classic":"Классика",
+      "by":"Усы","belarus":"Усы","беларусь":"Усы","усы":"Усы",
+      "eu":"Радуга","europe":"Радуга","европа":"Радуга","радуга":"Радуга",
+      "other":"Иное","другое":"Иное","иное":"Иное"
     };
-    const base=labels[key]||labels[String(c?.geo||"").toLowerCase()]||"Иное";
+    const base=labels[key]||raw||"Иное";
     const detail=String(c?.geoRegion||c?.geoDetail||c?.region||"").trim();
     return detail?`${base} · ${detail}`:base;
   }
