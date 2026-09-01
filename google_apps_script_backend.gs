@@ -64,6 +64,7 @@ function doPost(e) {
     if (action === "sendMessage") return handleSendMessage(body);
     if (action === "markMessageRead") return handleMarkMessageRead(body);
     if (action === "saveManagerSettings") return handleSaveManagerSettings(body);
+    if (action === "addAdminProjectComment") return handleAddAdminProjectComment(body);
     if (action === "saveProjectChecklist") return handleSaveProjectChecklist(body);
     if (action === "saveChecklistItem") return handleSaveChecklistItem(body);
     if (action === "updateManagerAccount") return handleUpdateManagerAccount(body);
@@ -413,6 +414,54 @@ function handleSaveManagerSettings(body) {
 }
 
 
+
+function handleAddAdminProjectComment(body) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const state = loadState();
+    const user = requireUser(body.token, state);
+    if (!user || user.role !== "admin") {
+      return jsonOut({ok:false,error:"Комментарий главного администратора может добавить только главный администратор"});
+    }
+
+    const projectId = String(body.projectId || "");
+    const text = String(body.text || "").trim();
+    if (!text) return jsonOut({ok:false,error:"Введите комментарий"});
+
+    const project = (state.clients || []).find(function(p){return p.id===projectId;});
+    if (!project) return jsonOut({ok:false,error:"Проект не найден"});
+    if (project.deleted) return jsonOut({ok:false,error:"Проект находится в корзине"});
+
+    const now = new Date().toISOString();
+    project.adminComments = Array.isArray(project.adminComments) ? project.adminComments : [];
+    project.adminComments.push({
+      id:"ac_" + Utilities.getUuid(),
+      text:text,
+      ts:now,
+      authorId:user.id,
+      authorName:user.name || "Главный администратор"
+    });
+
+    project.history = Array.isArray(project.history) ? project.history : [];
+    project.history.push({
+      ts:now,
+      type:"admin_comment",
+      actorName:user.name || "Главный администратор",
+      text:"Добавлен комментарий главного администратора: «" + text + "»"
+    });
+
+    saveState(state);
+    mirrorSheets(state);
+    SpreadsheetApp.flush();
+
+    return jsonOut({ok:true,project:project});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
 function handleSaveProjectChecklist(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -434,44 +483,70 @@ function handleSaveProjectChecklist(body) {
     }
 
     syncManagerTemplatesServer(state, project.managerId);
-
     project.theses = Array.isArray(project.theses) ? project.theses : [];
     project.blockChecks = Array.isArray(project.blockChecks) ? project.blockChecks : [];
+    project.history = Array.isArray(project.history) ? project.history : [];
 
     const thesisMap = {};
     (Array.isArray(body.theses) ? body.theses : []).forEach(function(x){
       thesisMap[String(x.id || "")] = x.done === true;
     });
-
     const blockMap = {};
     (Array.isArray(body.blocks) ? body.blocks : []).forEach(function(x){
       blockMap[String(x.id || "")] = x.done === true;
     });
 
     const now = new Date().toISOString();
+    const actor = user.name || user.login || "Пользователь";
+    let changed = 0;
+
     project.theses.forEach(function(row){
       const id = String(row.id || "");
-      if (Object.prototype.hasOwnProperty.call(thesisMap,id)) {
-        row.done = thesisMap[id];
+      if (!Object.prototype.hasOwnProperty.call(thesisMap,id)) return;
+      const oldDone = row.done !== false;
+      const newDone = thesisMap[id] === true;
+      if (oldDone !== newDone) {
+        row.done = newDone;
         row.updatedAt = now;
-      }
-    });
-    project.blockChecks.forEach(function(row){
-      const id = String(row.id || "");
-      if (Object.prototype.hasOwnProperty.call(blockMap,id)) {
-        row.done = blockMap[id];
-        row.updatedAt = now;
+        changed++;
+        project.history.push({
+          ts:now,
+          type:"thesis",
+          actorName:actor,
+          text:"Тезис " + (newDone ? "отмечен ✓" : "снят") + ": «" + String(row.text || "") + "»"
+        });
       }
     });
 
-    project.history = Array.isArray(project.history) ? project.history : [];
-    const total = project.theses.length + project.blockChecks.length;
-    const done = project.theses.filter(function(x){return x.done !== false;}).length +
-                 project.blockChecks.filter(function(x){return x.done !== false;}).length;
-    project.history.push({
-      ts:now,
-      text:"Сохранены тезисы и блоки: " + done + "/" + total
+    project.blockChecks.forEach(function(row){
+      const id = String(row.id || "");
+      if (!Object.prototype.hasOwnProperty.call(blockMap,id)) return;
+      const oldDone = row.done !== false;
+      const newDone = blockMap[id] === true;
+      if (oldDone !== newDone) {
+        row.done = newDone;
+        row.updatedAt = now;
+        changed++;
+        project.history.push({
+          ts:now,
+          type:"block",
+          actorName:actor,
+          text:"Блок " + (newDone ? "отмечен ✓" : "снят") + ": «" + String(row.text || "") + "»"
+        });
+      }
     });
+
+    if (changed) {
+      const total = project.theses.length + project.blockChecks.length;
+      const done = project.theses.filter(function(x){return x.done !== false;}).length +
+                   project.blockChecks.filter(function(x){return x.done !== false;}).length;
+      project.history.push({
+        ts:now,
+        type:"general",
+        actorName:actor,
+        text:"Сохранены изменения тезисов и блоков. Отмечено: " + done + "/" + total
+      });
+    }
 
     saveState(state);
     mirrorSheets(state);
@@ -482,7 +557,6 @@ function handleSaveProjectChecklist(body) {
     lock.releaseLock();
   }
 }
-
 
 function handleSaveChecklistItem(body) {
   const lock = LockService.getScriptLock();
@@ -518,8 +592,19 @@ function handleSaveChecklistItem(body) {
     }
 
     if(!row) return jsonOut({ok:false,error:"Элемент не найден"});
+    const oldDone = row.done !== false;
+    const eventTs = new Date().toISOString();
     row.done = done;
-    row.updatedAt = new Date().toISOString();
+    row.updatedAt = eventTs;
+    if (oldDone !== done) {
+      project.history = Array.isArray(project.history) ? project.history : [];
+      project.history.push({
+        ts:eventTs,
+        type:type==="thesis"?"thesis":"block",
+        actorName:user.name || user.login || "Пользователь",
+        text:(type==="thesis"?"Тезис ":"Блок ") + (done?"отмечен ✓":"снят") + ": «" + String(row.text || "") + "»"
+      });
+    }
 
     saveState(state);
     mirrorSheets(state);
@@ -1032,6 +1117,16 @@ function mirrorSheets(state) {
         p.name || "",
         pc.type === "negative" ? "Отрицательный" : "Обычный",
         pc.authorName || "",
+        pc.ts || "",
+        pc.text || ""
+      ]);
+    });
+    (p.adminComments || []).forEach(function(pc){
+      pcRows.push([
+        p.number || "",
+        p.name || "",
+        "Главный администратор",
+        pc.authorName || "Главный администратор",
         pc.ts || "",
         pc.text || ""
       ]);

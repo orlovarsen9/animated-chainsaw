@@ -1,6 +1,6 @@
 
 (() => {
-  const API_URL = "https://script.google.com/macros/s/AKfycbzmKJdQcKufpUoi3yo5HJ0M6X68gPUSMdtMc8YppZBrerQDa17Izv7-VOdtNKIugVZZRw/exec";
+  const API_URL = "https://script.google.com/macros/s/AKfycbxW_I_WKjUDJwBV-YJHWnDPz0ABnUmP8RrbWgX650Cd7PVqW_UWjMN5UrvpY8mV82DTkQ/exec";
   const CACHE_KEY = "project_crm_shared_cache_v24";
   const sessionKey = "project_crm_shared_session_v24";
 
@@ -192,6 +192,16 @@
       syncManagerTemplates(managerId);
       return await syncRemote(false);
     }
+  }
+
+  async function addAdminProjectCommentAtomic(projectId,text){
+    const data=await api("addAdminProjectComment",{projectId,text});
+    if(data.project){
+      const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
+      if(idx>=0) db.clients[idx]=data.project;
+      localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+    }
+    return data;
   }
 
   async function saveProjectChecklistBatch(projectId,theses,blocks){
@@ -470,10 +480,10 @@
 
   function geoLabel(c){
     const type=c.geoType||"";
-    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return " Усы";
-    if(type==="europe") return " Радуга";
-    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="russia") return `🇷🇺 Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return "🇧🇾 Усы";
+    if(type==="europe") return "🌈 Радуга";
+    if(type==="other") return `📍 Иное${c.region?` · ${esc(c.region)}`:""}`;
     return "📍 Не указано";
   }
 
@@ -643,9 +653,10 @@
     const clients = db.clients.filter(c=>c.managerId===me.id && !c.deleted);
     shell(`${nav("clients",me)}
       <div class="manager-message-bar">
-        <button class="boss-message-btn" data-inbox-kind="admin">
-          <span>✉ От главного админа</span>
-          ${inboxUnread(cfg.inbox.admin)?'<span class="unread-badge">1</span>':""}
+        <button class="boss-message-btn admin-boss-message ${inboxUnread(cfg.inbox.admin)?"admin-message-unread":""}" data-inbox-kind="admin">
+          <span class="admin-message-icon">⚠</span>
+          <span><b>Сообщение главного админа</b><small>Открыть важное сообщение</small></span>
+          ${inboxUnread(cfg.inbox.admin)?'<span class="unread-badge admin-unread-badge">1</span>':""}
         </button>
         <button class="boss-message-btn" data-inbox-kind="observer">
           <span>✉ От наблюдателя</span>
@@ -1496,6 +1507,17 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     modal.innerHTML=`<div class="modal-card project-detail-modal"><div class="modal-head"><div><h2>Проект №${String(c.number).padStart(3,"0")} · ${esc(c.name)}</h2><div class="muted">Менеджер: ${esc(manager?.name||"—")} · В общении ${daysBetween(c.startDate)} дн.</div></div><button class="icon-btn" data-close>×</button></div>
       ${pipeline(c)}
 
+      <div class="card admin-project-comment-card" style="box-shadow:none;margin-top:14px">
+        <div class="admin-project-comment-head">
+          <div>
+            <h3 style="margin:0">📌 Комментарий главного администратора</h3>
+            <div class="muted small">${me.role==="admin"?"Комментарий будет виден менеджеру именно в этом проекте.":"Важная информация от главного администратора по этому проекту."}</div>
+          </div>
+          ${me.role==="admin"&&!c.deleted?'<button class="btn admin-comment-btn" id="addAdminProjectComment">+ Добавить комментарий</button>':""}
+        </div>
+        <div id="adminProjectComments"></div>
+      </div>
+
       <div class="card theses-card" style="box-shadow:none;border:1px solid var(--line);margin-top:14px">
         <div class="theses-head">
           <div>
@@ -1547,11 +1569,68 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
         <button class="btn primary project-checklist-save-btn" id="saveProjectChecklist" type="button" disabled>Сохранить</button>
       </div>`:""}
 
-      <h3>История</h3><div class="timeline">${(c.history||[]).slice().sort((a,b)=>b.ts.localeCompare(a.ts)).map(h=>`<div class="timeline-item"><b>${new Date(h.ts).toLocaleString("ru-RU")}</b><span>${esc(h.text)}</span></div>`).join("")||'<div class="muted">Истории пока нет</div>'}</div>
+      <div class="full-history-head">
+        <h3>Полная история проекта</h3>
+        <div class="muted small">Здесь отображаются изменения карточки, комментарии, тезисы, блоки и время каждого действия.</div>
+      </div>
+      <div class="timeline full-project-history">${(c.history||[]).slice().sort((a,b)=>String(b.ts||"").localeCompare(String(a.ts||""))).map(h=>`<div class="timeline-item history-${esc(h.type||"general")}">
+        <div class="history-time">${h.ts?new Date(h.ts).toLocaleString("ru-RU"):"—"}</div>
+        <div class="history-body">
+          ${h.type?`<span class="history-kind">${esc(h.type==="thesis"?"Тезис":h.type==="block"?"Блок":h.type==="admin_comment"?"Главный админ":h.type==="comment"?"Комментарий":h.type==="edit"?"Изменение":"Событие")}</span>`:""}
+          <span>${esc(h.text)}</span>
+          ${h.actorName?`<span class="history-actor"> · ${esc(h.actorName)}</span>`:""}
+        </div>
+      </div>`).join("")||'<div class="muted">Истории пока нет</div>'}</div>
       <div class="actions">${c.deleted?'<span class="pill gray">Проект в корзине — редактирование недоступно</span>':""}${["admin","manager"].includes(me.role)?'<button class="btn ghost" id="viewDialogExport">Последняя выгрузка</button>':""}${me.role==="viewer"&&!c.deleted?'<button class="btn ghost" id="editDialogExport">Добавить / обновить выгрузку</button>':""}${canDelete?'<button class="btn danger" id="deleteProject">Удалить проект</button>':""}${canEdit?'<button class="btn primary" id="editClient">Редактировать</button>':""}<button class="btn ghost" data-close>Закрыть</button></div>
     </div>`;
     document.body.appendChild(modal);
     modal.querySelectorAll("[data-close]").forEach(x=>x.onclick=()=>modal.remove());
+
+    c.adminComments=Array.isArray(c.adminComments)?c.adminComments:[];
+    const adminProjectCommentsBox=modal.querySelector("#adminProjectComments");
+    const renderAdminProjectComments=()=>{
+      if(!adminProjectCommentsBox)return;
+      const rows=(c.adminComments||[]).slice().sort((a,b)=>String(b.ts||"").localeCompare(String(a.ts||"")));
+      adminProjectCommentsBox.innerHTML=rows.length?rows.map(x=>`<div class="admin-project-comment-item">
+        <div class="admin-project-comment-meta">Главный администратор · ${x.ts?new Date(x.ts).toLocaleString("ru-RU"):""}</div>
+        <div class="admin-project-comment-text">${esc(x.text||"")}</div>
+      </div>`).join(""):'<div class="muted admin-no-comment">Комментариев главного администратора пока нет.</div>';
+    };
+    renderAdminProjectComments();
+
+    const addAdminCommentBtn=modal.querySelector("#addAdminProjectComment");
+    if(addAdminCommentBtn && me.role==="admin"){
+      addAdminCommentBtn.onclick=()=>{
+        const cm=document.createElement("div");cm.className="modal nested-modal";
+        cm.innerHTML=`<div class="modal-card small-modal admin-comment-editor">
+          <div class="modal-head"><div><h2>Комментарий главного администратора</h2><div class="muted small">Комментарий относится только к проекту №${String(c.number).padStart(3,"0")} · ${esc(c.name)}</div></div><button class="icon-btn" data-close>×</button></div>
+          <div class="field"><label>Комментарий</label><textarea id="adminProjectCommentText" rows="6" placeholder="Введите важную информацию для менеджера..."></textarea></div>
+          <div class="actions"><button class="btn admin-comment-btn" id="saveAdminProjectComment">Сохранить комментарий</button><button class="btn ghost" data-close>Отмена</button></div>
+        </div>`;
+        document.body.appendChild(cm);
+        cm.querySelectorAll("[data-close]").forEach(x=>x.onclick=()=>cm.remove());
+        cm.querySelector("#saveAdminProjectComment").onclick=async()=>{
+          const text=(cm.querySelector("#adminProjectCommentText").value||"").trim();
+          if(!text){alert("Введите комментарий");return;}
+          const btn=cm.querySelector("#saveAdminProjectComment");
+          btn.disabled=true;btn.textContent="Сохраняю...";
+          try{
+            const data=await addAdminProjectCommentAtomic(c.id,text);
+            if(!data?.project)throw new Error(data?.error||"Сервер не подтвердил сохранение");
+            const saved=data.project;
+            c.adminComments=JSON.parse(JSON.stringify(saved.adminComments||[]));
+            c.history=JSON.parse(JSON.stringify(saved.history||[]));
+            cm.remove();
+            modal.remove();
+            openClient(c.id);
+          }catch(e){
+            btn.disabled=false;btn.textContent="Сохранить комментарий";
+            alert("Не удалось сохранить комментарий: "+(e.message||e));
+          }
+        };
+      };
+    }
+
     {
       const editBtn=document.getElementById("editClient");
       if(editBtn) editBtn.onclick=()=>{modal.remove();openClientEditor(id)};
@@ -1703,11 +1782,27 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
             c.blockChecks=JSON.parse(JSON.stringify(checklistDraft.blocks));
           }
 
-          c.history=c.history||[];
-          c.history.push({
-            ts:nowISO(),
-            text:`Сохранены тезисы и блоки: ${globalChecklistStats(draftProject).done}/${globalChecklistStats(draftProject).total}`
-          });
+          if(data?.project?.history){
+            c.history=JSON.parse(JSON.stringify(data.project.history));
+          }else{
+            // Резервный режим для старого backend.
+            const eventTs=nowISO();
+            c.history=c.history||[];
+            const oldTheses=new Map((c.theses||[]).map(x=>[x.id,x]));
+            const oldBlocks=new Map((c.blockChecks||[]).map(x=>[x.id,x]));
+            checklistDraft.theses.forEach(x=>{
+              const old=oldTheses.get(x.id);
+              if(old && (old.done!==false)!==(x.done!==false)){
+                c.history.push({ts:eventTs,type:"thesis",actorName:me.name,text:`Тезис ${x.done!==false?"отмечен ✓":"снят"}: «${x.text}»`});
+              }
+            });
+            checklistDraft.blocks.forEach(x=>{
+              const old=oldBlocks.get(x.id);
+              if(old && (old.done!==false)!==(x.done!==false)){
+                c.history.push({ts:eventTs,type:"block",actorName:me.name,text:`Блок ${x.done!==false?"отмечен ✓":"снят"}: «${x.text}»`});
+              }
+            });
+          }
           localStorage.setItem(CACHE_KEY,JSON.stringify(db));
 
           setChecklistDirty(false);
@@ -1752,8 +1847,16 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
       cm.querySelector("#saveProjectComment").onclick=()=>{
         const text=cm.querySelector("#projectCommentText").value.trim();if(!text){alert("Введите комментарий");return}
         const type=cm.querySelector("#projectCommentType").value;
-        if(existing){existing.text=text;existing.type=type;existing.updatedAt=nowISO();}
-        else c.projectComments.push({id:uid("pc_"),type,text,ts:nowISO(),authorId:me.id,authorName:me.name});
+        const eventTs=nowISO();
+        if(existing){
+          existing.text=text;existing.type=type;existing.updatedAt=eventTs;
+          c.history=c.history||[];
+          c.history.push({ts:eventTs,type:"comment",actorName:me.name,text:`Комментарий отредактирован: «${text}»`});
+        }else{
+          c.projectComments.push({id:uid("pc_"),type,text,ts:eventTs,authorId:me.id,authorName:me.name});
+          c.history=c.history||[];
+          c.history.push({ts:eventTs,type:"comment",actorName:me.name,text:`Добавлен ${type==="negative"?"отрицательный ":""}комментарий: «${text}»`});
+        }
         syncRemote(false);cm.remove();renderProjectComments();
       };
     };
@@ -1911,14 +2014,44 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     modal.querySelector("#clientForm").onsubmit=e=>{
       e.preventDefault();const fd=new FormData(e.target);
       if(c){
-        Object.assign(c,{name:fd.get("name"),nick:fd.get("nick"),age:fd.get("age"),gender:fd.get("gender"),geoType:fd.get("geoType"),region:fd.get("region"),startDate:fd.get("startDate"),profession:fd.get("profession"),discussion:fd.get("discussion"),notes:fd.get("notes"),interests:fd.get("interests"),managerId:me.role==="admin"?fd.get("managerId"):c.managerId});
+        const before={
+          name:c.name,nick:c.nick,age:c.age,gender:c.gender,geoType:c.geoType,region:c.region,
+          startDate:c.startDate,profession:c.profession,discussion:c.discussion,notes:c.notes,
+          interests:c.interests,managerId:c.managerId
+        };
+        const after={
+          name:fd.get("name"),nick:fd.get("nick"),age:fd.get("age"),gender:fd.get("gender"),
+          geoType:fd.get("geoType"),region:fd.get("region"),startDate:fd.get("startDate"),
+          profession:fd.get("profession"),discussion:fd.get("discussion"),notes:fd.get("notes"),
+          interests:fd.get("interests"),managerId:me.role==="admin"?fd.get("managerId"):c.managerId
+        };
+        Object.assign(c,after);
         const managerStages=managerConfig(c.managerId).funnelStages;
         c.stageIndex=Math.min(Number(c.stageIndex)||0,Math.max(0,managerStages.length-1));
         delete c.stages;
-        c.blockRecords=Array.isArray(c.blockRecords)?c.blockRecords:[];c.theses=Array.isArray(c.theses)?c.theses:[];c.history=c.history||[];c.history.push({ts:nowISO(),text:"Карточка проекта отредактирована"});
+        c.blockRecords=Array.isArray(c.blockRecords)?c.blockRecords:[];
+        c.theses=Array.isArray(c.theses)?c.theses:[];
+        c.history=c.history||[];
+        const labels={name:"Имя",nick:"Ник",age:"Возраст",gender:"Пол",geoType:"Гео",region:"Уточнение GEO",startDate:"Дата начала общения",profession:"Профессия",discussion:"Что уже обсуждали",notes:"Заметки менеджера",interests:"Интересы",managerId:"Менеджер"};
+        const eventTs=nowISO();
+        Object.keys(after).forEach(key=>{
+          if(String(before[key]??"")!==String(after[key]??"")){
+            let oldVal=String(before[key]??"—"),newVal=String(after[key]??"—");
+            if(key==="gender"){oldVal=before[key]==="male"?"Твёрдый":before[key]==="female"?"Мягкий":"—";newVal=after[key]==="male"?"Твёрдый":after[key]==="female"?"Мягкий":"—";}
+            if(key==="geoType"){
+              const gm={russia:"Классика",belarus:"Усы",europe:"Радуга",other:"Иное"};
+              oldVal=gm[before[key]]||"—";newVal=gm[after[key]]||"—";
+            }
+            if(key==="managerId"){
+              oldVal=db.users.find(u=>u.id===before[key])?.name||"—";
+              newVal=db.users.find(u=>u.id===after[key])?.name||"—";
+            }
+            c.history.push({ts:eventTs,type:"edit",actorName:me.name,text:`${labels[key]}: «${oldVal}» → «${newVal}»`});
+          }
+        });
       }else{
         const nextNum=Math.max(0,...db.clients.map(x=>x.number||0))+1;
-        db.clients.push({id:uid("c_"),number:nextNum,name:fd.get("name"),nick:fd.get("nick"),age:fd.get("age"),gender:fd.get("gender"),geoType:fd.get("geoType"),region:fd.get("region"),managerId:me.role==="admin"?fd.get("managerId"):me.id,profession:fd.get("profession"),discussion:fd.get("discussion"),notes:fd.get("notes"),interests:fd.get("interests"),startDate:fd.get("startDate"),stageIndex:0,deleted:false,blockRecords:[],blockChecks:[],theses:[],projectComments:[],history:[{ts:nowISO(),text:"Создан проект"}]});
+        db.clients.push({id:uid("c_"),number:nextNum,name:fd.get("name"),nick:fd.get("nick"),age:fd.get("age"),gender:fd.get("gender"),geoType:fd.get("geoType"),region:fd.get("region"),managerId:me.role==="admin"?fd.get("managerId"):me.id,profession:fd.get("profession"),discussion:fd.get("discussion"),notes:fd.get("notes"),interests:fd.get("interests"),startDate:fd.get("startDate"),stageIndex:0,deleted:false,blockRecords:[],blockChecks:[],theses:[],projectComments:[],history:[{ts:nowISO(),type:"edit",actorName:me.name,text:"Создан проект"}]});
       }
       syncRemote(false);modal.remove();render();
     };
