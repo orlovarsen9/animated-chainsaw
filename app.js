@@ -39,12 +39,6 @@
 
 
   let db = JSON.parse(JSON.stringify(seed));
-  // v66: синхронизируем старые проекты, где GEO мог храниться в разных полях.
-  (db.clients||[]).forEach(c=>{
-    if(!c.geo && c.geoCountry) c.geo=c.geoCountry;
-    if(!c.geoCountry && c.geo) c.geoCountry=c.geo;
-  });
-
   // v56_projects_reset_001: одноразово очищаем старые проекты в браузере.
   if(localStorage.getItem("citadel_reset_version")!=="v56_projects_reset_001"){
     db.clients=[];
@@ -475,60 +469,12 @@
   }
 
   function geoLabel(c){
-    const normalize=(v)=>String(v??"").trim().toLowerCase();
-
-    // В первую очередь берём текущее значение поля, которое используется редактором проекта.
-    // Поддерживаем также старые названия полей для уже созданных проектов.
-    const candidates=[
-      c?.geo,
-      c?.geoCountry,
-      c?.geoType,
-      c?.country,
-      c?.geoLabel
-    ].filter(v=>String(v??"").trim()!=="");
-
-    const labels={
-      "ru":"Классика",
-      "russia":"Классика",
-      "россия":"Классика",
-      "классика":"Классика",
-      "classic":"Классика",
-
-      "by":"Усы",
-      "belarus":"Усы",
-      "беларусь":"Усы",
-      "усы":"Усы",
-
-      "eu":"Радуга",
-      "europe":"Радуга",
-      "европа":"Радуга",
-      "радуга":"Радуга",
-
-      "other":"Иное",
-      "другое":"Иное",
-      "иное":"Иное"
-    };
-
-    let base="";
-    for(const value of candidates){
-      const key=normalize(value);
-      if(labels[key]){ base=labels[key]; break; }
-      if(["Классика","Усы","Радуга","Иное"].includes(String(value).trim())){
-        base=String(value).trim();
-        break;
-      }
-    }
-    if(!base) base="Иное";
-
-    const detail=String(
-      c?.geoRegion ??
-      c?.geoDetail ??
-      c?.region ??
-      c?.geoClarification ??
-      ""
-    ).trim();
-
-    return detail?`${base} · ${detail}`:base;
+    const type=c.geoType||"";
+    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return " Усы";
+    if(type==="europe") return " Радуга";
+    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
+    return "📍 Не указано";
   }
 
   function pipeline(c,mode="detail"){
