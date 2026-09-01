@@ -660,3 +660,63 @@ html[data-theme="dark"] .sms-bubble{background:#202c3b;color:#f3f6fa}
 @media(max-width:700px){
   .manager-account-card .form-grid{grid-template-columns:1fr}
 }
+
+
+/* v60 — настройки аккаунта менеджера рядом со стадиями проекта */
+.stage-settings-heading{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:14px;
+}
+.stage-settings-heading h3{margin:0}
+.manager-account-toggle{
+  white-space:nowrap;
+}
+.manager-account-inline{
+  margin:0 0 18px;
+  padding:16px;
+  border:1px solid var(--border, #2b394a);
+  border-radius:14px;
+  background:rgba(255,255,255,.02);
+}
+.manager-account-inline[hidden]{display:none!important}
+.manager-account-title{
+  font-weight:800;
+  font-size:16px;
+  margin-bottom:12px;
+}
+.manager-account-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+.manager-account-grid label{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.manager-account-grid input{width:100%}
+.manager-account-actions{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+  margin:14px 0 8px;
+}
+.account-avatar-preview{
+  width:54px;
+  height:54px;
+  flex:0 0 54px;
+}
+.account-avatar-preview img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  border-radius:50%;
+}
+@media(max-width:700px){
+  .stage-settings-heading{align-items:flex-start;flex-direction:column}
+  .manager-account-grid{grid-template-columns:1fr}
+}

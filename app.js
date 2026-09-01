@@ -926,7 +926,33 @@
 
       ${canManageThesesAndBlocks?`
       <div class="card config-panel" style="margin-top:14px">
-        <h3>Стадии проекта</h3>
+        <div class="stage-settings-heading">
+          <h3>Стадии проекта</h3>
+          <button class="btn manager-account-toggle" id="managerAccountToggle" type="button">Настройки менеджера</button>
+        </div>
+        <div class="manager-account-inline" id="managerAccountInline" hidden>
+          <div class="manager-account-title">Настройки менеджера</div>
+          <div class="manager-account-grid">
+            <label>Имя
+              <input id="managerAccountName" value="${esc(manager.name||"")}" placeholder="Имя менеджера">
+            </label>
+            <label>Логин
+              <input id="managerAccountLogin" value="${esc(manager.login||"")}" autocomplete="off" placeholder="Логин">
+            </label>
+            <label>Новый пароль
+              <input id="managerAccountPassword" type="password" autocomplete="new-password" placeholder="Оставьте пустым, если не меняете">
+            </label>
+            <label>Картинка менеджера
+              <input id="managerAvatarFile" type="file" accept="image/*">
+            </label>
+          </div>
+          <div class="manager-account-actions">
+            <div class="avatar manager-avatar account-avatar-preview" id="managerAvatarPreview">${manager.avatar?`<img src="${manager.avatar}" alt="">`:esc((manager.name||"М").charAt(0).toUpperCase())}</div>
+            <button class="btn" id="removeManagerAvatar" type="button">Убрать картинку</button>
+            <button class="btn primary" id="saveManagerAccount" type="button">Сохранить изменения</button>
+          </div>
+          <div class="muted small">Логин должен быть уникальным. Новый пароль вводится только если его нужно изменить.</div>
+        </div>
         <div class="muted small">Только наблюдатель задаёт стадии один раз для этого менеджера. Они применяются ко всем его проектам.</div>
         <label class="small" style="display:block;margin:12px 0 6px">Стадии проекта (через запятую)</label>
         <input id="managerStagesCsv" value="${esc(cfg.funnelStages.join(", "))}" placeholder="Начальная, Развитие, Слияние, Залив. инф, Пред. предлог, 72 часа">
@@ -1012,47 +1038,46 @@
     };
 
 
+    
+    const managerAccountToggle=modal.querySelector("#managerAccountToggle");
+    const managerAccountInline=modal.querySelector("#managerAccountInline");
+    if(managerAccountToggle && managerAccountInline){
+      managerAccountToggle.onclick=()=>{
+        managerAccountInline.hidden=!managerAccountInline.hidden;
+        managerAccountToggle.textContent=managerAccountInline.hidden?"Настройки менеджера":"Скрыть настройки";
+      };
+    }
+
     let pendingManagerAvatar=manager.avatar||"";
     const managerAvatarFile=modal.querySelector("#managerAvatarFile");
     const managerAvatarPreview=modal.querySelector("#managerAvatarPreview");
     const removeManagerAvatar=modal.querySelector("#removeManagerAvatar");
     const saveManagerAccount=modal.querySelector("#saveManagerAccount");
 
-    if(managerAvatarFile && canManageThesesAndBlocks) managerAvatarFile.onchange=async()=>{
+    if(managerAvatarFile) managerAvatarFile.onchange=async()=>{
       const file=managerAvatarFile.files?.[0];
       if(!file)return;
-      if(!String(file.type||"").startsWith("image/")){
-        alert("Выберите изображение");
-        managerAvatarFile.value="";
-        return;
-      }
-      if(file.size>2*1024*1024){
-        alert("Картинка должна быть не больше 2 МБ");
-        managerAvatarFile.value="";
-        return;
-      }
+      if(!String(file.type||"").startsWith("image/")){ alert("Выберите изображение"); return; }
+      if(file.size>2*1024*1024){ alert("Картинка должна быть не больше 2 МБ"); managerAvatarFile.value=""; return; }
       try{
         pendingManagerAvatar=await fileToDataUrl(file);
-        if(managerAvatarPreview) managerAvatarPreview.innerHTML=`<img src="${pendingManagerAvatar}" alt="">`;
-      }catch(e){
-        alert("Не удалось загрузить картинку");
-      }
+        managerAvatarPreview.innerHTML=`<img src="${pendingManagerAvatar}" alt="">`;
+      }catch(e){ alert("Не удалось загрузить картинку"); }
     };
 
-    if(removeManagerAvatar && canManageThesesAndBlocks) removeManagerAvatar.onclick=()=>{
+    if(removeManagerAvatar) removeManagerAvatar.onclick=()=>{
       pendingManagerAvatar="";
       if(managerAvatarFile) managerAvatarFile.value="";
       if(managerAvatarPreview) managerAvatarPreview.textContent=(manager.name||"М").charAt(0).toUpperCase();
     };
 
-    if(saveManagerAccount && canManageThesesAndBlocks) saveManagerAccount.onclick=async()=>{
+    if(saveManagerAccount) saveManagerAccount.onclick=async()=>{
       const name=(modal.querySelector("#managerAccountName")?.value||"").trim();
       const login=(modal.querySelector("#managerAccountLogin")?.value||"").trim();
       const password=modal.querySelector("#managerAccountPassword")?.value||"";
-
-      if(name.length<2){alert("Имя должно содержать минимум 2 символа");return}
-      if(login.length<3){alert("Логин должен содержать минимум 3 символа");return}
-      if(password && password.length<6){alert("Новый пароль должен содержать минимум 6 символов");return}
+      if(name.length<2){alert("Имя должно содержать минимум 2 символа");return;}
+      if(login.length<3){alert("Логин должен содержать минимум 3 символа");return;}
+      if(password && password.length<6){alert("Новый пароль должен содержать минимум 6 символов");return;}
 
       saveManagerAccount.disabled=true;
       const oldText=saveManagerAccount.textContent;
@@ -1061,15 +1086,16 @@
         const data=await updateManagerAccountAtomic(mid,{name,login,password,avatar:pendingManagerAvatar});
         if(!data || data.ok===false) throw new Error(data?.error||"Сервер не подтвердил сохранение");
         saveManagerAccount.textContent="Сохранено";
+        if(modal.querySelector("#managerAccountPassword")) modal.querySelector("#managerAccountPassword").value="";
         setTimeout(()=>{saveManagerAccount.disabled=false;saveManagerAccount.textContent=oldText;},700);
       }catch(e){
         saveManagerAccount.disabled=false;
         saveManagerAccount.textContent=oldText;
-        alert("Не удалось сохранить аккаунт менеджера: "+(e.message||e));
+        alert("Не удалось сохранить настройки менеджера: "+(e.message||e));
       }
     };
 
-    const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
+const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     if(saveManagerConfigBtn && canManageThesesAndBlocks) saveManagerConfigBtn.onclick=async()=>{
       const titleInput=modal.querySelector("#progressScaleTitle");
       if(titleInput) cfg.progressScaleTitle=titleInput.value.trim()||"Шкала прогресса";
