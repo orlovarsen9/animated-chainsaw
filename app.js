@@ -39,11 +39,21 @@
 
 
   let db = JSON.parse(JSON.stringify(seed));
-  // v56_projects_reset_001: одноразово очищаем старые проекты в браузере.
-  if(localStorage.getItem("citadel_reset_version")!=="v56_projects_reset_001"){
-    db.clients=[];
-    localStorage.setItem(CACHE_KEY,JSON.stringify(db));
-    localStorage.setItem("citadel_reset_version","v56_projects_reset_001");
+  // Безопасная инициализация локального кэша: ошибка localStorage больше не роняет весь сайт.
+  try{
+    const cached=JSON.parse(localStorage.getItem(CACHE_KEY)||"null");
+    if(cached && Array.isArray(cached.users)) db=cached;
+  }catch(e){
+    console.warn("Cache read failed:",e);
+  }
+  try{
+    if(localStorage.getItem("citadel_reset_version")!=="v56_projects_reset_001"){
+      db.clients=[];
+      localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+      localStorage.setItem("citadel_reset_version","v56_projects_reset_001");
+    }
+  }catch(e){
+    console.warn("Reset marker failed:",e);
   }
   let session = loadSession();
   let syncing = false;
@@ -500,10 +510,10 @@
 
   function geoLabel(c){
     const type=c.geoType||"";
-    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return " Усы";
-    if(type==="europe") return " Радуга";
-    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="russia") return `🇷🇺 Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return "🇧🇾 Усы";
+    if(type==="europe") return "🌈 Радуга";
+    if(type==="other") return `📍 Иное${c.region?` · ${esc(c.region)}`:""}`;
     return "📍 Не указано";
   }
 
@@ -2140,16 +2150,31 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     route(currentRoute || ((me.role==="admin"||me.role==="viewer")?"dashboard":"clients"));
   }
   async function bootstrap(){
-    if(session?.token){
-      const ok=await fetchState();
-      if(!ok){
-        try{
-          const cached=JSON.parse(localStorage.getItem(CACHE_KEY)||"null");
-          if(cached) db=cached;
-        }catch(e){}
+    try{
+      if(session?.token){
+        const ok=await fetchState();
+        if(!ok){
+          try{
+            const cached=JSON.parse(localStorage.getItem(CACHE_KEY)||"null");
+            if(cached && Array.isArray(cached.users)) db=cached;
+          }catch(e){}
+        }
+      }
+      render();
+    }catch(e){
+      console.error("Bootstrap error:",e);
+      try{
+        session=null;
+        localStorage.removeItem(sessionKey);
+      }catch(_){}
+      try{
+        loginView();
+      }catch(inner){
+        const root=document.getElementById("app")||document.body;
+        root.innerHTML='<div style="max-width:560px;margin:70px auto;padding:24px;font-family:Arial,sans-serif;color:#111827;background:white;border:1px solid #d1d5db;border-radius:16px"><h2 style="margin-top:0">Цитадель</h2><p>Интерфейс не загрузился из-за ошибки браузерного кэша.</p><button onclick="localStorage.clear();location.reload()" style="padding:10px 16px;border:0;border-radius:10px;background:#f59e0b;font-weight:700;cursor:pointer">Очистить кэш и перезагрузить</button></div>';
       }
     }
-    render();
   }
+  window.__citadelLoaded=true;
   bootstrap();
 })();
