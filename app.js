@@ -1,6 +1,6 @@
 
 (() => {
-  const API_URL = "https://script.google.com/macros/s/AKfycby5pCxJQoR5vki_VzpuvyDWF2J-qTCpUkgynWb06sUMnBySpOOJib1u7bMeKP8w9_BuUw/exec";
+  const API_URL = "https://script.google.com/macros/s/AKfycbzmKJdQcKufpUoi3yo5HJ0M6X68gPUSMdtMc8YppZBrerQDa17Izv7-VOdtNKIugVZZRw/exec";
   const CACHE_KEY = "project_crm_shared_cache_v24";
   const sessionKey = "project_crm_shared_session_v24";
 
@@ -191,6 +191,32 @@
       // Совместимость со старым backend.
       syncManagerTemplates(managerId);
       return await syncRemote(false);
+    }
+  }
+
+  async function saveProjectChecklistBatch(projectId,theses,blocks){
+    try{
+      const data=await api("saveProjectChecklist",{
+        projectId,
+        theses:(theses||[]).map(x=>({id:x.id,done:x.done!==false})),
+        blocks:(blocks||[]).map(x=>({id:x.id,done:x.done!==false}))
+      });
+      if(data.project){
+        const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
+        if(idx>=0) db.clients[idx]=data.project;
+        localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+      }
+      return data;
+    }catch(e){
+      // Совместимость со старым backend: сохраняем весь проект одним saveState.
+      if(!isUnknownActionError(e)) throw e;
+      const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
+      if(idx<0) throw new Error("Проект не найден");
+      db.clients[idx].theses=JSON.parse(JSON.stringify(theses||[]));
+      db.clients[idx].blockChecks=JSON.parse(JSON.stringify(blocks||[]));
+      const ok=await syncRemote(false);
+      if(!ok) throw new Error("Не удалось сохранить проект");
+      return {ok:true,project:db.clients[idx]};
     }
   }
 
@@ -1513,6 +1539,14 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
         <div id="blockChecklist" class="theses-list"></div>
       </div>
 
+      ${canChecklist?`<div class="project-checklist-savebar">
+        <div>
+          <b>Изменения тезисов и блоков</b>
+          <div class="muted small" id="checklistSaveHint">Выберите нужные тезисы и блоки, затем нажмите «Сохранить».</div>
+        </div>
+        <button class="btn primary project-checklist-save-btn" id="saveProjectChecklist" type="button" disabled>Сохранить</button>
+      </div>`:""}
+
       <h3>История</h3><div class="timeline">${(c.history||[]).slice().sort((a,b)=>b.ts.localeCompare(a.ts)).map(h=>`<div class="timeline-item"><b>${new Date(h.ts).toLocaleString("ru-RU")}</b><span>${esc(h.text)}</span></div>`).join("")||'<div class="muted">Истории пока нет</div>'}</div>
       <div class="actions">${c.deleted?'<span class="pill gray">Проект в корзине — редактирование недоступно</span>':""}${["admin","manager"].includes(me.role)?'<button class="btn ghost" id="viewDialogExport">Последняя выгрузка</button>':""}${me.role==="viewer"&&!c.deleted?'<button class="btn ghost" id="editDialogExport">Добавить / обновить выгрузку</button>':""}${canDelete?'<button class="btn danger" id="deleteProject">Удалить проект</button>':""}${canEdit?'<button class="btn primary" id="editClient">Редактировать</button>':""}<button class="btn ghost" data-close>Закрыть</button></div>
     </div>`;
@@ -1530,17 +1564,58 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     }
 
     c.theses = Array.isArray(c.theses) ? c.theses : [];
+    c.blockChecks = Array.isArray(c.blockChecks) ? c.blockChecks : [];
+
+    // v61: изменения чек-листа сначала живут только внутри открытого проекта.
+    // На сервер они уходят одним пакетом только по кнопке «Сохранить».
+    const checklistDraft={
+      theses:JSON.parse(JSON.stringify(c.theses)),
+      blocks:JSON.parse(JSON.stringify(c.blockChecks))
+    };
+    const draftProject={...c,theses:checklistDraft.theses,blockChecks:checklistDraft.blocks};
+    let checklistDirty=false;
+
+    const checklistSaveBtn=modal.querySelector("#saveProjectChecklist");
+    const checklistSaveHint=modal.querySelector("#checklistSaveHint");
+
+    const setChecklistDirty=(dirty=true)=>{
+      checklistDirty=!!dirty;
+      if(checklistSaveBtn){
+        checklistSaveBtn.disabled=!checklistDirty;
+        checklistSaveBtn.classList.toggle("has-changes",checklistDirty);
+      }
+      if(checklistSaveHint){
+        checklistSaveHint.textContent=checklistDirty
+          ?"Есть несохранённые изменения."
+          :"Все выбранные тезисы и блоки сохранены.";
+      }
+    };
+
+    const refreshDraftProgress=()=>{
+      const p=projectProgress(draftProject);
+      modal.querySelectorAll(".progress-percent").forEach(el=>el.textContent=`${p}%`);
+      const track=modal.querySelector(".pipe-track");
+      if(track){
+        track.style.setProperty("--progress",`${p*0.94}%`);
+        const idx=derivedStageIndex(draftProject);
+        track.querySelectorAll(".stage").forEach((el,i)=>{
+          el.classList.toggle("done",i<idx);
+          el.classList.toggle("current",i===idx);
+        });
+      }
+    };
+
     const thesesList=document.getElementById("thesesList");
 
     const renderTheses=()=>{
       if(!thesesList) return;
-      const rows=projectTheses(c);
+      const rows=projectTheses(draftProject);
       if(!rows.length){
         thesesList.innerHTML='<div class="muted">Основные тезисы ещё не добавлены наблюдателем или администратором.</div>';
         return;
       }
-      const stats=globalThesisStats(c);
-      const itemPct=checklistItemPercent(c);
+      const stats=globalThesisStats(draftProject);
+      const itemPct=checklistItemPercent(draftProject);
       thesesList.innerHTML=`<div class="thesis-stage-group">
         <div class="thesis-stage-title"><span>Основные тезисы</span><span class="thesis-counter">${stats.done}/${stats.total} проговорено</span></div>
         <div class="thesis-stage-body">
@@ -1553,25 +1628,19 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
         </div>
       </div>`;
       if(canChecklist){
-        thesesList.querySelectorAll("[data-thesis-toggle]").forEach(el=>el.onchange=async()=>{
-          const t=c.theses.find(x=>x.id===el.dataset.thesisToggle);
+        thesesList.querySelectorAll("[data-thesis-toggle]").forEach(el=>el.onchange=()=>{
+          const t=checklistDraft.theses.find(x=>x.id===el.dataset.thesisToggle);
           if(!t)return;
-          const checked=el.checked;
-          t.done=checked;t.updatedAt=nowISO();
-          c.history=c.history||[];
-          c.history.push({ts:nowISO(),text:`Тезис ${checked?"отмечен как проговорённый":"снят"}: «${t.text}»`});
-
-          // Сразу обновляем интерфейс. Каждый выбранный тезис сохраняется отдельно на сервере.
-          renderTheses();renderBlockChecklist();
-          const p=modal.querySelector(".progress-percent");if(p)p.textContent=`${projectProgress(c)}%`;
+          t.done=el.checked;
+          t.updatedAt=nowISO();
+          setChecklistDirty(true);
+          renderTheses();
+          renderBlockChecklist();
+          refreshDraftProgress();
           const totalBox=modal.querySelector(".theses-card .theses-total");
-          if(totalBox) totalBox.textContent=`${globalThesisStats(c).done}/${globalThesisStats(c).total}`;
-
-          try{
-            await saveChecklistAtomic(c.id,"thesis",t.id,checked);
-          }catch(e){
-            console.error(e);
-            alert("Не удалось сохранить выбранный тезис. Проверьте соединение и повторите.");
+          if(totalBox){
+            const s=globalThesisStats(draftProject);
+            totalBox.textContent=`${s.done}/${s.total}`;
           }
         });
       }
@@ -1580,13 +1649,12 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     renderTheses();
 
 
-    c.blockChecks=Array.isArray(c.blockChecks)?c.blockChecks:[];
     const blockChecklist=modal.querySelector("#blockChecklist");
     const renderBlockChecklist=()=>{
       if(!blockChecklist)return;
-      const rows=projectBlocks(c);
-      const stats=globalBlockStats(c);
-      const itemPct=checklistItemPercent(c);
+      const rows=projectBlocks(draftProject);
+      const stats=globalBlockStats(draftProject);
+      const itemPct=checklistItemPercent(draftProject);
       blockChecklist.innerHTML=rows.length?`<div class="thesis-stage-group">
         <div class="thesis-stage-title"><span>Основные блоки</span><span class="thesis-counter">${stats.done}/${stats.total} отмечено</span></div>
         <div class="thesis-stage-body">
@@ -1599,27 +1667,66 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
         </div>
       </div>`:'<div class="muted">Основные блоки ещё не добавлены наблюдателем или администратором.</div>';
       if(canChecklist){
-        blockChecklist.querySelectorAll("[data-block-toggle]").forEach(el=>el.onchange=async()=>{
-          const b=c.blockChecks.find(x=>x.id===el.dataset.blockToggle);if(!b)return;
-          const checked=el.checked;
-          b.done=checked;b.updatedAt=nowISO();
-          c.history=c.history||[];c.history.push({ts:nowISO(),text:`Блок ${checked?"отмечен":"снят"}: «${b.text}»`});
-
-          renderBlockChecklist();renderTheses();
-          const p=modal.querySelector(".progress-percent");if(p)p.textContent=`${projectProgress(c)}%`;
+        blockChecklist.querySelectorAll("[data-block-toggle]").forEach(el=>el.onchange=()=>{
+          const b=checklistDraft.blocks.find(x=>x.id===el.dataset.blockToggle);
+          if(!b)return;
+          b.done=el.checked;
+          b.updatedAt=nowISO();
+          setChecklistDirty(true);
+          renderBlockChecklist();
+          renderTheses();
+          refreshDraftProgress();
           const totalBox=modal.querySelector(".checklist-blocks-card .theses-total");
-          if(totalBox) totalBox.textContent=`${globalBlockStats(c).done}/${globalBlockStats(c).total}`;
-
-          try{
-            await saveChecklistAtomic(c.id,"block",b.id,checked);
-          }catch(e){
-            console.error(e);
-            alert("Не удалось сохранить выбранный блок. Проверьте соединение и повторите.");
+          if(totalBox){
+            const s=globalBlockStats(draftProject);
+            totalBox.textContent=`${s.done}/${s.total}`;
           }
         });
       }
     };
     renderBlockChecklist();
+
+    if(checklistSaveBtn){
+      checklistSaveBtn.onclick=async()=>{
+        if(!checklistDirty)return;
+        const oldText=checklistSaveBtn.textContent;
+        checklistSaveBtn.disabled=true;
+        checklistSaveBtn.textContent="Сохраняю...";
+        try{
+          const data=await saveProjectChecklistBatch(c.id,checklistDraft.theses,checklistDraft.blocks);
+          if(data?.project){
+            const saved=data.project;
+            c.theses=JSON.parse(JSON.stringify(saved.theses||checklistDraft.theses));
+            c.blockChecks=JSON.parse(JSON.stringify(saved.blockChecks||checklistDraft.blocks));
+          }else{
+            c.theses=JSON.parse(JSON.stringify(checklistDraft.theses));
+            c.blockChecks=JSON.parse(JSON.stringify(checklistDraft.blocks));
+          }
+
+          c.history=c.history||[];
+          c.history.push({
+            ts:nowISO(),
+            text:`Сохранены тезисы и блоки: ${globalChecklistStats(draftProject).done}/${globalChecklistStats(draftProject).total}`
+          });
+          localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+
+          setChecklistDirty(false);
+          checklistSaveBtn.textContent="Сохранено ✓";
+          setTimeout(()=>{
+            if(document.body.contains(checklistSaveBtn)){
+              checklistSaveBtn.textContent=oldText;
+              checklistSaveBtn.disabled=true;
+            }
+          },900);
+        }catch(e){
+          console.error(e);
+          checklistSaveBtn.disabled=false;
+          checklistSaveBtn.textContent=oldText;
+          if(checklistSaveHint) checklistSaveHint.textContent="Не удалось сохранить. Попробуйте ещё раз.";
+          alert("Не удалось сохранить тезисы и блоки: "+(e.message||e));
+        }
+      };
+    }
 
     c.projectComments=Array.isArray(c.projectComments)?c.projectComments:[];
     const commentsList=modal.querySelector("#projectCommentsList");

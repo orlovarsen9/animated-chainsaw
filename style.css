@@ -720,3 +720,39 @@ html[data-theme="dark"] .sms-bubble{background:#202c3b;color:#f3f6fa}
   .stage-settings-heading{align-items:flex-start;flex-direction:column}
   .manager-account-grid{grid-template-columns:1fr}
 }
+
+
+/* v61 — ручное сохранение выбранных тезисов и блоков */
+.project-checklist-savebar{
+  position:sticky;
+  bottom:10px;
+  z-index:7;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  margin-top:14px;
+  padding:14px 16px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:var(--panel,#121c29);
+  box-shadow:0 10px 30px rgba(0,0,0,.22);
+}
+.project-checklist-save-btn{
+  min-width:150px;
+  flex:0 0 auto;
+}
+.project-checklist-save-btn.has-changes{
+  box-shadow:0 0 0 3px rgba(245,158,11,.16);
+}
+.project-checklist-save-btn:disabled{
+  opacity:.55;
+  cursor:default;
+}
+@media(max-width:650px){
+  .project-checklist-savebar{
+    align-items:stretch;
+    flex-direction:column;
+  }
+  .project-checklist-save-btn{width:100%}
+}

@@ -64,6 +64,7 @@ function doPost(e) {
     if (action === "sendMessage") return handleSendMessage(body);
     if (action === "markMessageRead") return handleMarkMessageRead(body);
     if (action === "saveManagerSettings") return handleSaveManagerSettings(body);
+    if (action === "saveProjectChecklist") return handleSaveProjectChecklist(body);
     if (action === "saveChecklistItem") return handleSaveChecklistItem(body);
     if (action === "updateManagerAccount") return handleUpdateManagerAccount(body);
     if (action === "deleteManager") return handleDeleteManager(body);
@@ -410,6 +411,78 @@ function handleSaveManagerSettings(body) {
     lock.releaseLock();
   }
 }
+
+
+function handleSaveProjectChecklist(body) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const state = loadState();
+    const user = requireUser(body.token, state);
+    if (!user) return jsonOut({ok:false,error:"Сессия истекла"});
+
+    const projectId = String(body.projectId || "");
+    const project = (state.clients || []).find(function(p){return p.id===projectId;});
+    if (!project) return jsonOut({ok:false,error:"Проект не найден"});
+    if (project.deleted) return jsonOut({ok:false,error:"Проект находится в корзине"});
+
+    if (user.role === "manager" && project.managerId !== user.id) {
+      return jsonOut({ok:false,error:"Нет доступа"});
+    }
+    if (["manager","admin","viewer"].indexOf(user.role) < 0) {
+      return jsonOut({ok:false,error:"Нет доступа"});
+    }
+
+    syncManagerTemplatesServer(state, project.managerId);
+
+    project.theses = Array.isArray(project.theses) ? project.theses : [];
+    project.blockChecks = Array.isArray(project.blockChecks) ? project.blockChecks : [];
+
+    const thesisMap = {};
+    (Array.isArray(body.theses) ? body.theses : []).forEach(function(x){
+      thesisMap[String(x.id || "")] = x.done === true;
+    });
+
+    const blockMap = {};
+    (Array.isArray(body.blocks) ? body.blocks : []).forEach(function(x){
+      blockMap[String(x.id || "")] = x.done === true;
+    });
+
+    const now = new Date().toISOString();
+    project.theses.forEach(function(row){
+      const id = String(row.id || "");
+      if (Object.prototype.hasOwnProperty.call(thesisMap,id)) {
+        row.done = thesisMap[id];
+        row.updatedAt = now;
+      }
+    });
+    project.blockChecks.forEach(function(row){
+      const id = String(row.id || "");
+      if (Object.prototype.hasOwnProperty.call(blockMap,id)) {
+        row.done = blockMap[id];
+        row.updatedAt = now;
+      }
+    });
+
+    project.history = Array.isArray(project.history) ? project.history : [];
+    const total = project.theses.length + project.blockChecks.length;
+    const done = project.theses.filter(function(x){return x.done !== false;}).length +
+                 project.blockChecks.filter(function(x){return x.done !== false;}).length;
+    project.history.push({
+      ts:now,
+      text:"Сохранены тезисы и блоки: " + done + "/" + total
+    });
+
+    saveState(state);
+    mirrorSheets(state);
+    SpreadsheetApp.flush();
+
+    return jsonOut({ok:true,project:project});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 
 function handleSaveChecklistItem(body) {
   const lock = LockService.getScriptLock();
