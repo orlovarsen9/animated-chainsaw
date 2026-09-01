@@ -64,6 +64,8 @@ function doPost(e) {
     if (action === "sendMessage") return handleSendMessage(body);
     if (action === "markMessageRead") return handleMarkMessageRead(body);
     if (action === "saveManagerSettings") return handleSaveManagerSettings(body);
+    if (action === "deleteAdminProjectComment") return handleDeleteAdminProjectComment(body);
+    if (action === "clearAdminMessage") return handleClearAdminMessage(body);
     if (action === "addAdminProjectComment") return handleAddAdminProjectComment(body);
     if (action === "saveProjectChecklist") return handleSaveProjectChecklist(body);
     if (action === "saveChecklistItem") return handleSaveChecklistItem(body);
@@ -83,7 +85,7 @@ function defaultState() {
     users: [
       {
         id:"u_admin",
-        name:"Главный администратор",
+        name:"Административные правки",
         login:"admin",
         passwordHash:hashPassword("admin123"),
         role:"admin",
@@ -415,6 +417,83 @@ function handleSaveManagerSettings(body) {
 
 
 
+
+function handleDeleteAdminProjectComment(body) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const state = loadState();
+    const user = requireUser(body.token, state);
+    if (!user || user.role !== "admin") {
+      return jsonOut({ok:false,error:"Удалять административные правки может только администратор"});
+    }
+
+    const projectId = String(body.projectId || "");
+    const commentId = String(body.commentId || "");
+    const project = (state.clients || []).find(function(p){return p.id===projectId;});
+    if (!project) return jsonOut({ok:false,error:"Проект не найден"});
+
+    project.adminComments = Array.isArray(project.adminComments) ? project.adminComments : [];
+    const idx = project.adminComments.findIndex(function(x){
+      return String(x.id||"")===commentId && String(x.authorId||"")===String(user.id||"");
+    });
+    if (idx < 0) return jsonOut({ok:false,error:"Правка не найдена или принадлежит другому пользователю"});
+
+    const removed = project.adminComments[idx];
+    project.adminComments.splice(idx,1);
+
+    project.history = Array.isArray(project.history) ? project.history : [];
+    project.history.push({
+      ts:new Date().toISOString(),
+      type:"admin_comment",
+      actorName:"Административные правки",
+      text:"Удалена административная правка: «" + String(removed.text || "") + "»"
+    });
+
+    saveState(state);
+    mirrorSheets(state);
+    SpreadsheetApp.flush();
+
+    return jsonOut({ok:true,project:project});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function handleClearAdminMessage(body) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const state = loadState();
+    const user = requireUser(body.token, state);
+    if (!user || user.role !== "admin") {
+      return jsonOut({ok:false,error:"Удалять административное сообщение может только администратор"});
+    }
+
+    const managerId = String(body.managerId || "");
+    const manager = (state.users || []).find(function(u){
+      return u.id===managerId && u.role==="manager";
+    });
+    if (!manager) return jsonOut({ok:false,error:"Менеджер не найден"});
+
+    state.managerConfigs = state.managerConfigs || {};
+    if (!state.managerConfigs[managerId]) state.managerConfigs[managerId] = emptyManagerConfig();
+    const cfg = state.managerConfigs[managerId];
+    cfg.inbox = cfg.inbox || {};
+    cfg.inbox.admin = {id:"",text:"",sentAt:"",readAt:""};
+
+    saveState(state);
+    mirrorSheets(state);
+    SpreadsheetApp.flush();
+
+    return jsonOut({ok:true,config:cfg});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
 function handleAddAdminProjectComment(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -422,7 +501,7 @@ function handleAddAdminProjectComment(body) {
     const state = loadState();
     const user = requireUser(body.token, state);
     if (!user || user.role !== "admin") {
-      return jsonOut({ok:false,error:"Комментарий главного администратора может добавить только главный администратор"});
+      return jsonOut({ok:false,error:"Комментарий административных правок может добавить только административные правки"});
     }
 
     const projectId = String(body.projectId || "");
@@ -440,15 +519,15 @@ function handleAddAdminProjectComment(body) {
       text:text,
       ts:now,
       authorId:user.id,
-      authorName:user.name || "Главный администратор"
+      authorName:user.name || "Административные правки"
     });
 
     project.history = Array.isArray(project.history) ? project.history : [];
     project.history.push({
       ts:now,
       type:"admin_comment",
-      actorName:user.name || "Главный администратор",
-      text:"Добавлен комментарий главного администратора: «" + text + "»"
+      actorName:user.name || "Административные правки",
+      text:"Добавлен комментарий административных правок: «" + text + "»"
     });
 
     saveState(state);
@@ -761,7 +840,7 @@ function handleSaveState(body) {
   if (user.role === "admin") {
     next.defaultStages = Array.isArray(incoming.defaultStages) ? incoming.defaultStages : current.defaultStages;
     next.blockOptions = Array.isArray(incoming.blockOptions) ? incoming.blockOptions : current.blockOptions;
-    // Главный админ может отправлять только свой канал сообщений.
+    // Административные правки может отправлять только свой канал сообщений.
     next.managerConfigs = JSON.parse(JSON.stringify(current.managerConfigs || {}));
     const incCfgAll = incoming.managerConfigs && typeof incoming.managerConfigs === "object" ? incoming.managerConfigs : {};
     Object.keys(incCfgAll).forEach(function(mid){
@@ -1027,7 +1106,7 @@ function mirrorSheets(state) {
   const uRows = [["ID","Имя","Логин","Роль","Доступ","Ник"]];
   const tRows = [["№ проекта","Имя","Этап","Тезис","Проговорен","Автор","Создан"]];
   const pcRows = [["№ проекта","Имя","Тип","Автор","Дата","Комментарий"]];
-  const mdRows = [["Менеджер","Логин","Название шкалы","Стадии воронки","Кол-во тезисов","Кол-во блоков","Блокнот","Блокнот обновлён","Сообщение главного админа","Дата","Прочитано","Сообщение наблюдателя","Дата","Прочитано"]];
+  const mdRows = [["Менеджер","Логин","Название шкалы","Стадии воронки","Кол-во тезисов","Кол-во блоков","Блокнот","Блокнот обновлён","Сообщение административных правок","Дата","Прочитано","Сообщение наблюдателя","Дата","Прочитано"]];
 
   (state.users || []).forEach(function(u){
     uRows.push([
@@ -1125,8 +1204,8 @@ function mirrorSheets(state) {
       pcRows.push([
         p.number || "",
         p.name || "",
-        "Главный администратор",
-        pc.authorName || "Главный администратор",
+        "Административные правки",
+        pc.authorName || "Административные правки",
         pc.ts || "",
         pc.text || ""
       ]);

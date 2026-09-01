@@ -1,12 +1,12 @@
 
 (() => {
-  const API_URL = "https://script.google.com/macros/s/AKfycbxW_I_WKjUDJwBV-YJHWnDPz0ABnUmP8RrbWgX650Cd7PVqW_UWjMN5UrvpY8mV82DTkQ/exec";
+  const API_URL = "https://script.google.com/macros/s/AKfycbwNlwVe6BY1QEN05H_t5gUG7mljoUXDoVJEMvNFYfomDeXOCtJxYcWxNxi4EpMYTnYeww/exec";
   const CACHE_KEY = "project_crm_shared_cache_v24";
   const sessionKey = "project_crm_shared_session_v24";
 
   const seed = {
     users: [
-      {id:"u_admin",name:"Главный администратор",login:"admin",password:"admin123",role:"admin",phone:"",active:true},
+      {id:"u_admin",name:"Административные правки",login:"admin",password:"admin123",role:"admin",phone:"",active:true},
       
       {id:"u_view",name:"Наблюдатель",login:"viewer",password:"viewer123",role:"viewer",phone:"",active:true}
     ],
@@ -192,6 +192,26 @@
       syncManagerTemplates(managerId);
       return await syncRemote(false);
     }
+  }
+
+  async function deleteAdminProjectCommentAtomic(projectId,commentId){
+    const data=await api("deleteAdminProjectComment",{projectId,commentId});
+    if(data.project){
+      const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
+      if(idx>=0) db.clients[idx]=data.project;
+      localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+    }
+    return data;
+  }
+
+  async function clearAdminManagerMessageAtomic(managerId){
+    const data=await api("clearAdminMessage",{managerId});
+    if(data.config){
+      db.managerConfigs=db.managerConfigs||{};
+      db.managerConfigs[managerId]=data.config;
+      localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+    }
+    return data;
   }
 
   async function addAdminProjectCommentAtomic(projectId,text){
@@ -475,15 +495,15 @@
   }
 
   function inboxTitle(kind){
-    return kind==="admin" ? "От главного админа" : "От наблюдателя";
+    return kind==="admin" ? "Административные правки" : "От наблюдателя";
   }
 
   function geoLabel(c){
     const type=c.geoType||"";
-    if(type==="russia") return `🇷🇺 Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return "🇧🇾 Усы";
-    if(type==="europe") return "🌈 Радуга";
-    if(type==="other") return `📍 Иное${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return " Усы";
+    if(type==="europe") return " Радуга";
+    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
     return "📍 Не указано";
   }
 
@@ -655,7 +675,7 @@
       <div class="manager-message-bar">
         <button class="boss-message-btn admin-boss-message ${inboxUnread(cfg.inbox.admin)?"admin-message-unread":""}" data-inbox-kind="admin">
           <span class="admin-message-icon">⚠</span>
-          <span><b>Сообщение главного админа</b><small>Открыть важное сообщение</small></span>
+          <span><b>Административные правки</b><small>Открыть важное сообщение</small></span>
           ${inboxUnread(cfg.inbox.admin)?'<span class="unread-badge admin-unread-badge">1</span>':""}
         </button>
         <button class="boss-message-btn" data-inbox-kind="observer">
@@ -958,6 +978,7 @@
         <textarea id="bossMsg1" placeholder="Введите сообщение менеджеру...">${esc((me.role==="admin"?cfg.inbox.admin:cfg.inbox.observer).text||"")}</textarea>
         <div class="actions" style="margin-top:10px">
           <button class="btn primary" id="sendBossMessage">Отправить СМС</button>
+          ${me.role==="admin" && cfg.inbox.admin?.text?'<button class="btn danger" id="deleteBossMessage">Удалить сообщение</button>':""}
         </div>
       </div>
 
@@ -1051,6 +1072,27 @@
       cfg.blockTemplates.push({id:uid("bt_"),stageIndex:0,text});
       inp.value="";renderTpl();
     };
+    const deleteBossMessage=modal.querySelector("#deleteBossMessage");
+    if(deleteBossMessage && me.role==="admin"){
+      deleteBossMessage.onclick=async()=>{
+        if(!confirm("Удалить сообщение из блока «Административные правки» у этого менеджера?"))return;
+        deleteBossMessage.disabled=true;
+        try{
+          const data=await clearAdminManagerMessageAtomic(mid);
+          if(data?.config){
+            db.managerConfigs=db.managerConfigs||{};
+            db.managerConfigs[mid]=data.config;
+          }
+          const ta=modal.querySelector("#bossMsg1");
+          if(ta)ta.value="";
+          deleteBossMessage.remove();
+        }catch(e){
+          deleteBossMessage.disabled=false;
+          alert("Не удалось удалить сообщение: "+(e.message||e));
+        }
+      };
+    }
+
     const sendBossMessage=modal.querySelector("#sendBossMessage");
     if(sendBossMessage) sendBossMessage.onclick=async()=>{
       const text=modal.querySelector("#bossMsg1").value.trim();
@@ -1510,7 +1552,7 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
       <div class="card admin-project-comment-card" style="box-shadow:none;margin-top:14px">
         <div class="admin-project-comment-head">
           <div>
-            <h3 style="margin:0">📌 Комментарий главного администратора</h3>
+            <h3 style="margin:0">📌 Административные правки</h3>
             <div class="muted small">${me.role==="admin"?"Комментарий будет виден менеджеру именно в этом проекте.":"Важная информация от главного администратора по этому проекту."}</div>
           </div>
           ${me.role==="admin"&&!c.deleted?'<button class="btn admin-comment-btn" id="addAdminProjectComment">+ Добавить комментарий</button>':""}
@@ -1576,7 +1618,7 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
       <div class="timeline full-project-history">${(c.history||[]).slice().sort((a,b)=>String(b.ts||"").localeCompare(String(a.ts||""))).map(h=>`<div class="timeline-item history-${esc(h.type||"general")}">
         <div class="history-time">${h.ts?new Date(h.ts).toLocaleString("ru-RU"):"—"}</div>
         <div class="history-body">
-          ${h.type?`<span class="history-kind">${esc(h.type==="thesis"?"Тезис":h.type==="block"?"Блок":h.type==="admin_comment"?"Главный админ":h.type==="comment"?"Комментарий":h.type==="edit"?"Изменение":"Событие")}</span>`:""}
+          ${h.type?`<span class="history-kind">${esc(h.type==="thesis"?"Тезис":h.type==="block"?"Блок":h.type==="admin_comment"?"Административные правки":h.type==="comment"?"Комментарий":h.type==="edit"?"Изменение":"Событие")}</span>`:""}
           <span>${esc(h.text)}</span>
           ${h.actorName?`<span class="history-actor"> · ${esc(h.actorName)}</span>`:""}
         </div>
@@ -1592,9 +1634,28 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
       if(!adminProjectCommentsBox)return;
       const rows=(c.adminComments||[]).slice().sort((a,b)=>String(b.ts||"").localeCompare(String(a.ts||"")));
       adminProjectCommentsBox.innerHTML=rows.length?rows.map(x=>`<div class="admin-project-comment-item">
-        <div class="admin-project-comment-meta">Главный администратор · ${x.ts?new Date(x.ts).toLocaleString("ru-RU"):""}</div>
+        <div class="admin-project-comment-topline">
+          <div class="admin-project-comment-meta">Административные правки · ${x.ts?new Date(x.ts).toLocaleString("ru-RU"):""}</div>
+          ${me.role==="admin" && String(x.authorId||"")===String(me.id||"") && !c.deleted
+            ?`<button class="btn danger small-btn" data-delete-admin-project-comment="${x.id}">Удалить</button>`:""}
+        </div>
         <div class="admin-project-comment-text">${esc(x.text||"")}</div>
-      </div>`).join(""):'<div class="muted admin-no-comment">Комментариев главного администратора пока нет.</div>';
+      </div>`).join(""):'<div class="muted admin-no-comment">Административных правок пока нет.</div>';
+      adminProjectCommentsBox.querySelectorAll("[data-delete-admin-project-comment]").forEach(btn=>btn.onclick=async()=>{
+        const commentId=btn.dataset.deleteAdminProjectComment;
+        if(!confirm("Удалить эту административную правку?"))return;
+        btn.disabled=true;
+        try{
+          const data=await deleteAdminProjectCommentAtomic(c.id,commentId);
+          if(!data?.project)throw new Error(data?.error||"Сервер не подтвердил удаление");
+          c.adminComments=JSON.parse(JSON.stringify(data.project.adminComments||[]));
+          c.history=JSON.parse(JSON.stringify(data.project.history||[]));
+          renderAdminProjectComments();
+        }catch(e){
+          btn.disabled=false;
+          alert("Не удалось удалить административную правку: "+(e.message||e));
+        }
+      });
     };
     renderAdminProjectComments();
 
@@ -1603,7 +1664,7 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
       addAdminCommentBtn.onclick=()=>{
         const cm=document.createElement("div");cm.className="modal nested-modal";
         cm.innerHTML=`<div class="modal-card small-modal admin-comment-editor">
-          <div class="modal-head"><div><h2>Комментарий главного администратора</h2><div class="muted small">Комментарий относится только к проекту №${String(c.number).padStart(3,"0")} · ${esc(c.name)}</div></div><button class="icon-btn" data-close>×</button></div>
+          <div class="modal-head"><div><h2>Административные правки</h2><div class="muted small">Комментарий относится только к проекту №${String(c.number).padStart(3,"0")} · ${esc(c.name)}</div></div><button class="icon-btn" data-close>×</button></div>
           <div class="field"><label>Комментарий</label><textarea id="adminProjectCommentText" rows="6" placeholder="Введите важную информацию для менеджера..."></textarea></div>
           <div class="actions"><button class="btn admin-comment-btn" id="saveAdminProjectComment">Сохранить комментарий</button><button class="btn ghost" data-close>Отмена</button></div>
         </div>`;

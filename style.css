@@ -845,3 +845,20 @@ html[data-theme="dark"] .sms-bubble{background:#202c3b;color:#f3f6fa}
   .admin-project-comment-head{flex-direction:column}
   .full-project-history .timeline-item{grid-template-columns:1fr;gap:4px}
 }
+
+
+/* v70 — удаление административных правок */
+.admin-project-comment-topline{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+}
+.admin-project-comment-topline .small-btn{
+  flex:0 0 auto;
+}
+@media(max-width:650px){
+  .admin-project-comment-topline{
+    flex-direction:column;
+  }
+}
