@@ -1,6 +1,6 @@
 
 (() => {
-  const API_URL = "https://script.google.com/macros/s/AKfycbwNlwVe6BY1QEN05H_t5gUG7mljoUXDoVJEMvNFYfomDeXOCtJxYcWxNxi4EpMYTnYeww/exec";
+  const API_URL = "https://script.google.com/macros/s/AKfycbxc_tBWgtfI532gPenUwek8a47s3FAeIsPuP84WAJ7c-Thi_arpqt5UOVAyBD59Fic5-w/exec";
   const CACHE_KEY = "project_crm_shared_cache_v24";
   const sessionKey = "project_crm_shared_session_v24";
 
@@ -75,14 +75,33 @@
     render();
   }
   async function api(action,payload={}){
-    const r=await fetch(API_URL,{
-      method:"POST",
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body:JSON.stringify({action,token:session?.token||"",...payload})
-    });
-    const data=await r.json().catch(()=>({}));
-    if(!r.ok || data.ok===false) throw new Error(data.error||"Ошибка сервера");
-    return data;
+    const attempts=(action==="login"||action==="getState")?3:2;
+    let lastError=null;
+    for(let attempt=1;attempt<=attempts;attempt++){
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),18000);
+      try{
+        const r=await fetch(API_URL,{
+          method:"POST",
+          headers:{"Content-Type":"text/plain;charset=utf-8"},
+          body:JSON.stringify({action,token:session?.token||"",...payload}),
+          signal:controller.signal,
+          cache:"no-store"
+        });
+        const text=await r.text();
+        let data={};
+        try{data=text?JSON.parse(text):{}}catch(_){throw new Error("Сервер вернул некорректный ответ");}
+        if(!r.ok || data.ok===false) throw new Error(data.error||"Ошибка сервера");
+        return data;
+      }catch(e){
+        lastError=e;
+        const msg=String(e?.message||e||"");
+        if(/неверный логин|неверный пароль|нет доступа|заблокирован/i.test(msg) || attempt===attempts) break;
+        await new Promise(r=>setTimeout(r,700*attempt));
+      }finally{clearTimeout(timer);}
+    }
+    if(lastError?.name==="AbortError") throw new Error("Сервер долго отвечает. Попробуйте войти ещё раз.");
+    throw lastError||new Error("Нет связи с сервером");
   }
   function isUnknownActionError(e){
     const s=String(e?.message||e||"").toLowerCase();
@@ -204,6 +223,50 @@
     }
   }
 
+  async function createTrainingAccountAtomic(payload){
+    const data=await api("createTrainingAccount",payload);
+    if(data.state){db=data.state;localStorage.setItem(CACHE_KEY,JSON.stringify(db));}
+    return data;
+  }
+  async function uploadTrainingFileAtomic(traineeId,file,title){
+    const base64=await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(String(reader.result||"").split(",").pop()||"");
+      reader.onerror=()=>reject(reader.error||new Error("Не удалось прочитать файл"));
+      reader.readAsDataURL(file);
+    });
+    const data=await api("uploadTrainingFile",{traineeId,title:title||file.name,fileName:file.name,mimeType:file.type||"application/octet-stream",dataBase64:base64});
+    if(data.state){db=data.state;localStorage.setItem(CACHE_KEY,JSON.stringify(db));}
+    return data;
+  }
+  async function deleteTrainingFileAtomic(traineeId,fileId){
+    const data=await api("deleteTrainingFile",{traineeId,fileId});
+    if(data.state){db=data.state;localStorage.setItem(CACHE_KEY,JSON.stringify(db));}
+    return data;
+  }
+  async function markTrainingFileReadAtomic(fileId){
+    const data=await api("markTrainingFileRead",{fileId});
+    if(data.state){db=data.state;localStorage.setItem(CACHE_KEY,JSON.stringify(db));}
+    return data;
+  }
+  async function deleteTrainingAccountAtomic(traineeId){
+    const data=await api("deleteTrainingAccount",{traineeId});
+    if(data.state){db=data.state;localStorage.setItem(CACHE_KEY,JSON.stringify(db));}
+    return data;
+  }
+  function trainingProgram(userId){
+    db.trainingPrograms=db.trainingPrograms&&typeof db.trainingPrograms==="object"?db.trainingPrograms:{};
+    const p=db.trainingPrograms[userId]||{files:[],readFileIds:[],createdAt:""};
+    p.files=Array.isArray(p.files)?p.files:[];
+    p.readFileIds=Array.isArray(p.readFileIds)?p.readFileIds:[];
+    return p;
+  }
+  function trainingProgress(userId){
+    const p=trainingProgram(userId), total=p.files.length, readSet=new Set(p.readFileIds.map(String));
+    const done=p.files.filter(f=>readSet.has(String(f.id))).length;
+    return {total,done,percent:total?Math.round(done/total*100):0};
+  }
+
   async function deleteAdminProjectCommentAtomic(projectId,commentId){
     const data=await api("deleteAdminProjectComment",{projectId,commentId});
     if(data.project){
@@ -235,31 +298,66 @@
   }
 
   async function saveProjectChecklistBatch(projectId,theses,blocks){
+    const payload={
+      projectId:String(projectId||""),
+      theses:(Array.isArray(theses)?theses:[]).map(x=>({id:String(x.id||""),done:x.done!==false})),
+      blocks:(Array.isArray(blocks)?blocks:[]).map(x=>({id:String(x.id||""),done:x.done!==false}))
+    };
+
+    // Основной путь — атомарное сохранение только этого проекта.
     try{
-      const data=await api("saveProjectChecklist",{
-        projectId,
-        theses:(theses||[]).map(x=>({id:x.id,done:x.done!==false})),
-        blocks:(blocks||[]).map(x=>({id:x.id,done:x.done!==false}))
-      });
+      const data=await api("saveProjectChecklist",payload);
+      if(!data || data.ok===false) throw new Error(data?.error||"Сервер не подтвердил сохранение");
+
       if(data.project){
-        const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
+        if(!db || typeof db!=="object") throw new Error("Локальная база не инициализирована");
+        db.clients=Array.isArray(db.clients)?db.clients:[];
+        const idx=db.clients.findIndex(x=>String(x.id)===String(projectId));
         if(idx>=0) db.clients[idx]=data.project;
-        localStorage.setItem(CACHE_KEY,JSON.stringify(db));
+        else db.clients.push(data.project);
+        try{localStorage.setItem(CACHE_KEY,JSON.stringify(db));}catch(_){}
       }
       return data;
     }catch(e){
-      // Совместимость со старым backend: сохраняем весь проект одним saveState.
-      if(!isUnknownActionError(e)) throw e;
-      const idx=(db.clients||[]).findIndex(x=>x.id===projectId);
-      if(idx<0) throw new Error("Проект не найден");
-      db.clients[idx].theses=JSON.parse(JSON.stringify(theses||[]));
-      db.clients[idx].blockChecks=JSON.parse(JSON.stringify(blocks||[]));
-      const ok=await syncRemote(false);
-      if(!ok) throw new Error("Не удалось сохранить проект");
-      return {ok:true,project:db.clients[idx]};
+      console.warn("saveProjectChecklist atomic failed:",e);
+
+      // Если action не поддерживается старым backend — сохраняем через saveState.
+      if(isUnknownActionError(e)){
+        if(!db || typeof db!=="object") throw new Error("Локальная база не загружена");
+        db.clients=Array.isArray(db.clients)?db.clients:[];
+        const idx=db.clients.findIndex(x=>String(x.id)===String(projectId));
+        if(idx<0) throw new Error("Проект не найден в локальной базе");
+
+        db.clients[idx].theses=JSON.parse(JSON.stringify(Array.isArray(theses)?theses:[]));
+        db.clients[idx].blockChecks=JSON.parse(JSON.stringify(Array.isArray(blocks)?blocks:[]));
+
+        const ok=await syncRemote(false);
+        if(!ok) throw new Error("Не удалось сохранить проект на сервере");
+        return {ok:true,project:db.clients[idx]};
+      }
+
+      // При временном сетевом/серверном сбое пробуем один раз подтянуть свежую базу
+      // и повторить атомарное сохранение, не используя потенциально повреждённый state.
+      try{
+        const fresh=await api("getState");
+        if(fresh?.state && Array.isArray(fresh.state.clients)){
+          db=fresh.state;
+          try{localStorage.setItem(CACHE_KEY,JSON.stringify(db));}catch(_){}
+        }
+        const retry=await api("saveProjectChecklist",payload);
+        if(!retry || retry.ok===false) throw new Error(retry?.error||"Повторное сохранение не подтверждено");
+        if(retry.project){
+          db.clients=Array.isArray(db.clients)?db.clients:[];
+          const idx=db.clients.findIndex(x=>String(x.id)===String(projectId));
+          if(idx>=0) db.clients[idx]=retry.project; else db.clients.push(retry.project);
+          try{localStorage.setItem(CACHE_KEY,JSON.stringify(db));}catch(_){}
+        }
+        return retry;
+      }catch(retryError){
+        throw new Error(retryError?.message||e?.message||"Не удалось сохранить тезисы и блоки");
+      }
     }
   }
-
   async function saveChecklistAtomic(projectId,type,itemId,done){
     try{
       const data=await api("saveChecklistItem",{projectId,type,itemId,done:!!done});
@@ -510,10 +608,10 @@
 
   function geoLabel(c){
     const type=c.geoType||"";
-    if(type==="russia") return ` Классика${c.region?` · ${esc(c.region)}`:""}`;
-    if(type==="belarus") return " Усы";
-    if(type==="europe") return " Радуга";
-    if(type==="other") return ` Иное${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="russia") return `🇷🇺 Классика${c.region?` · ${esc(c.region)}`:""}`;
+    if(type==="belarus") return "🇧🇾 Усы";
+    if(type==="europe") return "🌈 Радуга";
+    if(type==="other") return `📍 Иное${c.region?` · ${esc(c.region)}`:""}`;
     return "📍 Не указано";
   }
 
@@ -560,7 +658,9 @@
       const login=String(fd.get("login")||"").trim();
       const password=String(fd.get("password")||"");
       const err=document.getElementById("loginErr");
-      err.textContent="Проверка...";
+      const submit=e.target.querySelector("button");
+      if(submit){submit.disabled=true;submit.textContent="Входим...";}
+      err.textContent="Подключение к серверу...";
       try{
         const data=await api("login",{login,password});
         if(!data || !data.token) throw new Error(data?.error||"Сервер не вернул токен входа");
@@ -584,6 +684,8 @@
         render();
       }catch(ex){
         err.textContent=ex.message||"Неверный логин или пароль.";
+      }finally{
+        if(submit){submit.disabled=false;submit.textContent="Войти";}
       }
     };
   }
@@ -591,9 +693,11 @@
   function shell(content){
     const me = db.users.find(u=>u.id===session.userId);
     if(!me){logout();return}
-    const menu = (me.role==="admin" || me.role==="viewer")
-      ? [["dashboard","⌂","Главная"],["managers","◉","Менеджеры"],["allclients","▦","Проекты"],["trash","⌫","Корзина"],...(me.role==="admin"?[["users","♙","Пользователи"]]:[])]
-      : [["clients","⌂","Главная"],["clients","▦","Проекты"],["notebook","✎","Блокнот"]];
+    const menu = me.role==="trainee"
+      ? [["training","▤","Обучение"]]
+      : (me.role==="admin" || me.role==="viewer")
+        ? [["dashboard","⌂","Главная"],["managers","◉","Менеджеры"],["allclients","▦","Проекты"],...(me.role==="viewer"?[["trainingAdmin","▤","Обучение"]]:[]),["trash","⌫","Корзина"],...(me.role==="admin"?[["users","♙","Пользователи"]]:[])]
+        : [["clients","⌂","Главная"],["clients","▦","Проекты"],["notebook","✎","Блокнот"]];
     const theme = localStorage.getItem("project_theme") || "light";
     document.documentElement.setAttribute("data-theme", theme);
     app.innerHTML = `<div class="app-shell">
@@ -637,14 +741,16 @@
     document.getElementById("logoutBtn").onclick=logout;
     document.getElementById("mobileLogout").onclick=logout;
   }
-  function roleName(r){ return r==="admin"?"Администратор":r==="manager"?"Менеджер":"Наблюдатель"; }
+  function roleName(r){ return r==="admin"?"Администратор":r==="manager"?"Менеджер":r==="trainee"?"Обучение":"Наблюдатель"; }
 
   function nav(active, me){
-    const tabs = me.role==="admin"
-      ? [["dashboard","Обзор"],["managers","Менеджеры"],["allclients","Все проекты"],["users","Пользователи"]]
-      : me.role==="viewer"
-        ? [["dashboard","Обзор"],["managers","Менеджеры"],["allclients","Все проекты"]]
-        : [["clients","Мои проекты"],["notebook","Блокнот"]];
+    const tabs = me.role==="trainee"
+      ? [["training","Моё обучение"]]
+      : me.role==="admin"
+        ? [["dashboard","Обзор"],["managers","Менеджеры"],["allclients","Все проекты"],["users","Пользователи"]]
+        : me.role==="viewer"
+          ? [["dashboard","Обзор"],["managers","Менеджеры"],["allclients","Все проекты"],["trainingAdmin","Обучение"]]
+          : [["clients","Мои проекты"],["notebook","Блокнот"]];
     return `<div class="tabs">${tabs.map(([id,t])=>`<button class="tab ${active===id?"active":""}" data-nav="${id}">${t}</button>`).join("")}</div>`;
   }
 
@@ -1842,54 +1948,44 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
         const oldText=checklistSaveBtn.textContent;
         checklistSaveBtn.disabled=true;
         checklistSaveBtn.textContent="Сохраняю...";
+        if(checklistSaveHint)checklistSaveHint.textContent="Сохраняем выбранные тезисы и блоки...";
+
         try{
           const data=await saveProjectChecklistBatch(c.id,checklistDraft.theses,checklistDraft.blocks);
-          if(data?.project){
-            const saved=data.project;
+          const saved=data?.project;
+
+          if(saved){
             c.theses=JSON.parse(JSON.stringify(saved.theses||checklistDraft.theses));
             c.blockChecks=JSON.parse(JSON.stringify(saved.blockChecks||checklistDraft.blocks));
+            c.history=JSON.parse(JSON.stringify(saved.history||c.history||[]));
+
+            // Синхронизируем черновик с реально сохранённым проектом.
+            checklistDraft.theses=JSON.parse(JSON.stringify(c.theses));
+            checklistDraft.blocks=JSON.parse(JSON.stringify(c.blockChecks));
+            draftProject.theses=checklistDraft.theses;
+            draftProject.blockChecks=checklistDraft.blocks;
           }else{
             c.theses=JSON.parse(JSON.stringify(checklistDraft.theses));
             c.blockChecks=JSON.parse(JSON.stringify(checklistDraft.blocks));
           }
 
-          if(data?.project?.history){
-            c.history=JSON.parse(JSON.stringify(data.project.history));
-          }else{
-            // Резервный режим для старого backend.
-            const eventTs=nowISO();
-            c.history=c.history||[];
-            const oldTheses=new Map((c.theses||[]).map(x=>[x.id,x]));
-            const oldBlocks=new Map((c.blockChecks||[]).map(x=>[x.id,x]));
-            checklistDraft.theses.forEach(x=>{
-              const old=oldTheses.get(x.id);
-              if(old && (old.done!==false)!==(x.done!==false)){
-                c.history.push({ts:eventTs,type:"thesis",actorName:me.name,text:`Тезис ${x.done!==false?"отмечен ✓":"снят"}: «${x.text}»`});
-              }
-            });
-            checklistDraft.blocks.forEach(x=>{
-              const old=oldBlocks.get(x.id);
-              if(old && (old.done!==false)!==(x.done!==false)){
-                c.history.push({ts:eventTs,type:"block",actorName:me.name,text:`Блок ${x.done!==false?"отмечен ✓":"снят"}: «${x.text}»`});
-              }
-            });
-          }
-          localStorage.setItem(CACHE_KEY,JSON.stringify(db));
-
           setChecklistDirty(false);
+          refreshDraftProgress();
           checklistSaveBtn.textContent="Сохранено ✓";
+          if(checklistSaveHint)checklistSaveHint.textContent="Все выбранные тезисы и блоки сохранены.";
+
           setTimeout(()=>{
             if(document.body.contains(checklistSaveBtn)){
               checklistSaveBtn.textContent=oldText;
               checklistSaveBtn.disabled=true;
             }
-          },900);
+          },1200);
         }catch(e){
-          console.error(e);
+          console.error("Checklist save error:",e);
           checklistSaveBtn.disabled=false;
           checklistSaveBtn.textContent=oldText;
-          if(checklistSaveHint) checklistSaveHint.textContent="Не удалось сохранить. Попробуйте ещё раз.";
-          alert("Не удалось сохранить тезисы и блоки: "+(e.message||e));
+          if(checklistSaveHint)checklistSaveHint.textContent="Не удалось сохранить. Нажмите «Сохранить» ещё раз.";
+          alert("Не удалось сохранить тезисы и блоки: "+(e?.message||e));
         }
       };
     }
@@ -2128,17 +2224,72 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     };
   }
 
+
+  function trainingAdminView(){
+    const me=db.users.find(u=>u.id===session.userId);
+    if(!me||me.role!=="viewer")return render();
+    const trainees=(db.users||[]).filter(u=>u.role==="trainee");
+    shell(`${nav("trainingAdmin",me)}
+      <div class="section-head"><div><h1>Обучение</h1><p class="muted">Учебные аккаунты, материалы и прогресс.</p></div><button class="btn primary" id="createTrainee">+ Создать аккаунт</button></div>
+      <div class="training-admin-grid">${trainees.length?trainees.map(u=>{const s=trainingProgress(u.id);return `<div class="card trainee-card">
+        <div class="trainee-card-head"><div><h3>${esc(u.name)}</h3><div class="muted small">Логин: ${esc(u.login)}</div></div><span class="training-percent">${s.percent}%</span></div>
+        <div class="training-progress"><span style="width:${s.percent}%"></span></div>
+        <div class="training-stats"><b>${s.done} из ${s.total}</b> материалов прочитано</div>
+        <div class="actions"><button class="btn primary" data-open-trainee="${u.id}">Материалы</button><button class="btn danger" data-delete-trainee="${u.id}">Удалить</button></div>
+      </div>`}).join(""):'<div class="card empty">Учебных аккаунтов пока нет.</div>'}</div>`);
+    wireNav();
+    document.getElementById("createTrainee").onclick=()=>{
+      const m=document.createElement("div");m.className="modal";
+      m.innerHTML=`<div class="modal-card small-modal"><div class="modal-head"><div><h2>Аккаунт для обучения</h2><div class="muted small">Пользователь увидит только своё обучение.</div></div><button class="icon-btn" data-close>×</button></div>
+      <form id="traineeCreateForm"><div class="field"><label>Имя</label><input name="name" required></div><div class="field" style="margin-top:12px"><label>Логин</label><input name="login" required></div><div class="field" style="margin-top:12px"><label>Пароль</label><input type="password" name="password" required></div><div class="actions"><button class="btn primary">Создать</button><button type="button" class="btn ghost" data-close>Отмена</button></div></form></div>`;
+      document.body.appendChild(m);m.querySelectorAll("[data-close]").forEach(x=>x.onclick=()=>m.remove());
+      m.querySelector("#traineeCreateForm").onsubmit=async e=>{
+        e.preventDefault();const fd=new FormData(e.target),btn=e.target.querySelector("button");btn.disabled=true;btn.textContent="Создаю...";
+        try{const d=await createTrainingAccountAtomic({name:String(fd.get("name")||"").trim(),login:String(fd.get("login")||"").trim(),password:String(fd.get("password")||"")});alert(`${d.loginAdjusted?"Такой логин уже был занят, поэтому создан новый учебный логин.\n\n":""}Аккаунт создан.\nЛогин: ${d.login}\nПароль: ${fd.get("password")}`);m.remove();trainingAdminView();}
+        catch(err){btn.disabled=false;btn.textContent="Создать";alert(err.message||err);}
+      };
+    };
+    document.querySelectorAll("[data-open-trainee]").forEach(b=>b.onclick=()=>openTrainingManager(b.dataset.openTrainee));
+    document.querySelectorAll("[data-delete-trainee]").forEach(b=>b.onclick=async()=>{const id=b.dataset.deleteTrainee;if(!confirm("Удалить учебный аккаунт и его файлы?"))return;b.disabled=true;try{await deleteTrainingAccountAtomic(id);trainingAdminView();}catch(e){b.disabled=false;alert(e.message||e);}});
+  }
+
+  function openTrainingManager(id){
+    const me=db.users.find(u=>u.id===session.userId),u=db.users.find(x=>x.id===id&&x.role==="trainee");
+    if(!me||me.role!=="viewer"||!u)return;
+    const p=trainingProgram(id),s=trainingProgress(id),readSet=new Set(p.readFileIds.map(String));
+    const m=document.createElement("div");m.className="modal";
+    m.innerHTML=`<div class="modal-card training-manager-modal"><div class="modal-head"><div><h2>Обучение · ${esc(u.name)}</h2><div class="muted small">Логин: ${esc(u.login)}</div></div><button class="icon-btn" data-close>×</button></div>
+      <div class="training-summary-card"><div><b>Прогресс обучения</b><div class="muted small">${s.done} из ${s.total}</div></div><strong>${s.percent}%</strong><div class="training-progress wide"><span style="width:${s.percent}%"></span></div></div>
+      <div class="card"><h3 style="margin-top:0">Добавить материал</h3><div class="form-grid"><div class="field"><label>Название</label><input id="trainingFileTitle" placeholder="Урок 1"></div><div class="field"><label>Файл</label><input id="trainingFileInput" type="file"></div></div><div class="muted small">Максимум 10 МБ на файл.</div><button class="btn primary" id="uploadTrainingFile" style="margin-top:12px">Загрузить файл</button></div>
+      <div class="training-files-admin">${p.files.length?p.files.map((f,i)=>`<div class="training-file-row"><div class="training-file-index">${i+1}</div><div class="training-file-info"><b>${esc(f.title||f.fileName)}</b><span>${esc(f.fileName||"")}</span></div><span class="pill ${readSet.has(String(f.id))?"green":"gray"}">${readSet.has(String(f.id))?"Прочитано":"Не открыто"}</span><a class="btn ghost" href="${esc(f.url||"#")}" target="_blank" rel="noopener">Открыть</a><button class="btn danger small-btn" data-delete-training-file="${f.id}">Удалить</button></div>`).join(""):'<div class="card empty">Материалов пока нет.</div>'}</div></div>`;
+    document.body.appendChild(m);m.querySelectorAll("[data-close]").forEach(x=>x.onclick=()=>m.remove());
+    m.querySelector("#uploadTrainingFile").onclick=async()=>{const file=m.querySelector("#trainingFileInput").files?.[0],title=(m.querySelector("#trainingFileTitle").value||"").trim();if(!file)return alert("Выберите файл");if(file.size>10*1024*1024)return alert("Максимум 10 МБ");const b=m.querySelector("#uploadTrainingFile");b.disabled=true;b.textContent="Загружаю...";try{await uploadTrainingFileAtomic(id,file,title||file.name);m.remove();openTrainingManager(id);}catch(e){b.disabled=false;b.textContent="Загрузить файл";alert(e.message||e);}};
+    m.querySelectorAll("[data-delete-training-file]").forEach(b=>b.onclick=async()=>{if(!confirm("Удалить файл?"))return;b.disabled=true;try{await deleteTrainingFileAtomic(id,b.dataset.deleteTrainingFile);m.remove();openTrainingManager(id);}catch(e){b.disabled=false;alert(e.message||e);}});
+  }
+
+  function traineeTrainingView(){
+    const me=db.users.find(u=>u.id===session.userId);if(!me||me.role!=="trainee")return render();
+    const p=trainingProgram(me.id),s=trainingProgress(me.id),readSet=new Set(p.readFileIds.map(String));
+    shell(`${nav("training",me)}<div class="training-hero"><div><span class="training-kicker">ВАШЕ ОБУЧЕНИЕ</span><h1>${esc(me.name)}</h1><p>Открывайте материалы. Каждый открытый материал увеличивает прогресс.</p></div><div class="training-big-percent">${s.percent}%</div></div>
+      <div class="card trainee-progress-card"><div class="trainee-progress-head"><div><b>Шкала прогресса обучения</b><div class="muted small">Пройдено ${s.done} из ${s.total}</div></div><strong>${s.percent}%</strong></div><div class="training-progress large"><span style="width:${s.percent}%"></span></div></div>
+      <div class="training-lessons">${p.files.length?p.files.map((f,i)=>{const read=readSet.has(String(f.id));return `<button class="training-lesson ${read?"read":""}" data-training-open="${f.id}" data-url="${esc(f.url||"")}"><span class="lesson-number">${read?"✓":i+1}</span><span class="lesson-main"><b>${esc(f.title||f.fileName)}</b><small>${read?"Материал открыт":"Нажмите, чтобы открыть"}</small></span><span class="lesson-status">${read?"Прочитано":"Открыть"}</span></button>`}).join(""):'<div class="card empty">Материалы ещё не добавлены.</div>'}</div>`);
+    wireNav();
+    document.querySelectorAll("[data-training-open]").forEach(b=>b.onclick=async()=>{if(b.dataset.url)window.open(b.dataset.url,"_blank","noopener");try{await markTrainingFileReadAtomic(b.dataset.trainingOpen);traineeTrainingView();}catch(e){alert("Материал открыт, но прогресс не сохранился. Попробуйте ещё раз.");}});
+  }
+
   let currentRoute=null;
   function route(r){
     currentRoute=r;
     const users=Array.isArray(db?.users)?db.users:[]; const me=users.find(u=>u.id===session.userId)||users.find(u=>u.role==="admin")||users[0];
     if(!me)return loginView();
-    if(r==="trash") return trashView();
-    if(me.role==="manager" && r==="notebook") return notebookView();
-    if(me.role==="admin" || me.role==="viewer"){
+    if(me.role==="trainee")return traineeTrainingView();
+    if(r==="trash")return trashView();
+    if(me.role==="manager"&&r==="notebook")return notebookView();
+    if(me.role==="admin"||me.role==="viewer"){
       if(r==="managers")return adminManagers();
       if(r==="allclients")return adminAllClients();
-      if(r==="users" && me.role==="admin")return usersView();
+      if(r==="trainingAdmin"&&me.role==="viewer")return trainingAdminView();
+      if(r==="users"&&me.role==="admin")return usersView();
       return adminDashboard();
     }
     return managerView();
@@ -2147,7 +2298,7 @@ const saveManagerConfigBtn=modal.querySelector("#saveManagerConfig");
     if(!session)return loginView();
     const users=Array.isArray(db?.users)?db.users:[]; const me=users.find(u=>u.id===session.userId)||users.find(u=>u.role==="admin")||users[0];
     if(!me||!me.active){logout();return}
-    route(currentRoute || ((me.role==="admin"||me.role==="viewer")?"dashboard":"clients"));
+    route(currentRoute || (me.role==="trainee"?"training":((me.role==="admin"||me.role==="viewer")?"dashboard":"clients")));
   }
   async function bootstrap(){
     try{

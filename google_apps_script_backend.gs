@@ -18,6 +18,7 @@ const USERS_SHEET = "Пользователи";
 const THESES_SHEET = "Тезисы";
 const PROJECT_COMMENTS_SHEET = "Комментарии проекта";
 const MANAGER_DATA_SHEET = "Блокноты и сообщения";
+const TRAINING_SHEET = "Обучение";
 const CHUNK_SIZE = 40000;
 const SESSION_HOURS = 168; // 7 дней
 
@@ -58,6 +59,11 @@ function doPost(e) {
     const action = String(body.action || "");
 
     if (action === "login") return handleLogin(body);
+    if (action === "createTrainingAccount") return handleCreateTrainingAccount(body);
+    if (action === "uploadTrainingFile") return handleUploadTrainingFile(body);
+    if (action === "deleteTrainingFile") return handleDeleteTrainingFile(body);
+    if (action === "markTrainingFileRead") return handleMarkTrainingFileRead(body);
+    if (action === "deleteTrainingAccount") return handleDeleteTrainingAccount(body);
     if (action === "getState") return handleGetState(body);
     if (action === "getManagerData") return handleGetManagerData(body);
     if (action === "saveNotebook") return handleSaveNotebook(body);
@@ -111,8 +117,15 @@ function defaultState() {
       "u_mgr1":{notebook:"",notebookUpdatedAt:"",inbox:{admin:{id:"",text:"",sentAt:"",readAt:""},observer:{id:"",text:"",sentAt:"",readAt:""}},progressScaleTitle:"Шкала прогресса",funnelStages:["Начальная","Развитие","Слияние","Залив. инф","Пред. предлог","72 часа"],thesisTemplates:[],blockTemplates:[]}
     },
     clients:[],
+    trainingPrograms:{},
     audit:[]
   };
+}
+
+function trainingStateForUser(state,user){
+  const programs={};
+  programs[user.id]=JSON.parse(JSON.stringify(((state.trainingPrograms||{})[user.id])||{files:[],readFileIds:[],createdAt:""}));
+  return {users:[sanitizeUser(user)],clients:[],managerConfigs:{},trainingPrograms:programs,defaultStages:[],blockOptions:[],audit:[]};
 }
 
 function handleLogin(body) {
@@ -138,15 +151,78 @@ function handleLogin(body) {
     ok:true,
     token:token,
     user:sanitizeUser(user),
-    state:sanitizeState(state)
+    state:user.role==="trainee"?trainingStateForUser(state,user):sanitizeState(state)
   });
+}
+
+
+function ensureTrainingProgram(state,id){
+  state.trainingPrograms=state.trainingPrograms&&typeof state.trainingPrograms==="object"?state.trainingPrograms:{};
+  if(!state.trainingPrograms[id])state.trainingPrograms[id]={files:[],readFileIds:[],createdAt:new Date().toISOString()};
+  const p=state.trainingPrograms[id];p.files=Array.isArray(p.files)?p.files:[];p.readFileIds=Array.isArray(p.readFileIds)?p.readFileIds:[];return p;
+}
+function getTrainingFolder(){
+  const props=PropertiesService.getScriptProperties(),fid=props.getProperty("CITADEL_TRAINING_FOLDER_ID");
+  if(fid){try{return DriveApp.getFolderById(fid);}catch(e){}}
+  const f=DriveApp.createFolder("Цитадель — обучение");props.setProperty("CITADEL_TRAINING_FOLDER_ID",f.getId());return f;
+}
+function handleCreateTrainingAccount(body){
+  const lock=LockService.getScriptLock();lock.waitLock(20000);
+  try{const state=loadState(),user=requireUser(body.token,state);if(!user||user.role!=="viewer")return jsonOut({ok:false,error:"Только наблюдатель может создавать учебные аккаунты"});
+    const name=String(body.name||"").trim(),login=String(body.login||"").trim().toLowerCase(),password=String(body.password||"");
+    if(name.length<2)return jsonOut({ok:false,error:"Введите имя"});if(login.length<3)return jsonOut({ok:false,error:"Логин минимум 3 символа"});if(password.length<6)return jsonOut({ok:false,error:"Пароль минимум 6 символов"});
+    let finalLogin=login;
+    const used={};
+    (state.users||[]).forEach(function(u){used[String(u.login||"").trim().toLowerCase()]=true;});
+    if(used[finalLogin]){
+      const base=(login+"-study").replace(/[^a-z0-9._-]/gi,"");
+      finalLogin=base||("study-"+new Date().getTime());
+      let n=2;
+      while(used[finalLogin]){finalLogin=(base||"study")+"-"+n;n++;}
+    }
+    const id="u_training_"+Utilities.getUuid();state.users.push({id:id,name:name,login:finalLogin,passwordHash:hashPassword(password),role:"trainee",nick:"",avatar:"",active:true});ensureTrainingProgram(state,id);
+    saveState(state);mirrorSheets(state);SpreadsheetApp.flush();return jsonOut({ok:true,login:finalLogin,loginAdjusted:finalLogin!==login,state:sanitizeState(state)});
+  }finally{lock.releaseLock();}
+}
+function handleUploadTrainingFile(body){
+  const lock=LockService.getScriptLock();lock.waitLock(30000);
+  try{const state=loadState(),user=requireUser(body.token,state);if(!user||user.role!=="viewer")return jsonOut({ok:false,error:"Нет доступа"});
+    const id=String(body.traineeId||""),trainee=(state.users||[]).find(function(u){return u.id===id&&u.role==="trainee";});if(!trainee)return jsonOut({ok:false,error:"Учебный аккаунт не найден"});
+    const data=String(body.dataBase64||"");if(!data)return jsonOut({ok:false,error:"Файл пустой"});if(data.length>14*1024*1024)return jsonOut({ok:false,error:"Максимум 10 МБ"});
+    const fileName=String(body.fileName||"file").replace(/[\\/:*?"<>|]/g,"_"),mime=String(body.mimeType||"application/octet-stream"),title=String(body.title||fileName).trim()||fileName;
+    const file=getTrainingFolder().createFile(Utilities.newBlob(Utilities.base64Decode(data),mime,fileName));try{file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);}catch(e){}
+    ensureTrainingProgram(state,id).files.push({id:"tf_"+Utilities.getUuid(),title:title,fileName:fileName,mimeType:mime,driveFileId:file.getId(),url:file.getUrl(),createdAt:new Date().toISOString()});
+    saveState(state);mirrorSheets(state);SpreadsheetApp.flush();return jsonOut({ok:true,state:sanitizeState(state)});
+  }finally{lock.releaseLock();}
+}
+function handleDeleteTrainingFile(body){
+  const lock=LockService.getScriptLock();lock.waitLock(20000);
+  try{const state=loadState(),user=requireUser(body.token,state);if(!user||user.role!=="viewer")return jsonOut({ok:false,error:"Нет доступа"});
+    const id=String(body.traineeId||""),fileId=String(body.fileId||""),p=ensureTrainingProgram(state,id),idx=p.files.findIndex(function(f){return String(f.id||"")===fileId;});if(idx<0)return jsonOut({ok:false,error:"Файл не найден"});
+    const row=p.files[idx];if(row.driveFileId){try{DriveApp.getFileById(row.driveFileId).setTrashed(true);}catch(e){}}p.files.splice(idx,1);p.readFileIds=p.readFileIds.filter(function(x){return String(x)!==fileId;});
+    saveState(state);mirrorSheets(state);SpreadsheetApp.flush();return jsonOut({ok:true,state:sanitizeState(state)});
+  }finally{lock.releaseLock();}
+}
+function handleMarkTrainingFileRead(body){
+  const lock=LockService.getScriptLock();lock.waitLock(20000);
+  try{const state=loadState(),user=requireUser(body.token,state);if(!user||user.role!=="trainee")return jsonOut({ok:false,error:"Нет доступа"});
+    const fileId=String(body.fileId||""),p=ensureTrainingProgram(state,user.id);if(!p.files.some(function(f){return String(f.id||"")===fileId;}))return jsonOut({ok:false,error:"Материал не найден"});
+    if(p.readFileIds.map(String).indexOf(fileId)<0)p.readFileIds.push(fileId);p.lastActivityAt=new Date().toISOString();saveState(state);mirrorSheets(state);SpreadsheetApp.flush();return jsonOut({ok:true,state:trainingStateForUser(state,user)});
+  }finally{lock.releaseLock();}
+}
+function handleDeleteTrainingAccount(body){
+  const lock=LockService.getScriptLock();lock.waitLock(20000);
+  try{const state=loadState(),user=requireUser(body.token,state);if(!user||user.role!=="viewer")return jsonOut({ok:false,error:"Нет доступа"});
+    const id=String(body.traineeId||""),p=ensureTrainingProgram(state,id);(p.files||[]).forEach(function(f){if(f.driveFileId){try{DriveApp.getFileById(f.driveFileId).setTrashed(true);}catch(e){}}});
+    state.users=(state.users||[]).filter(function(u){return u.id!==id;});if(state.trainingPrograms)delete state.trainingPrograms[id];saveState(state);mirrorSheets(state);SpreadsheetApp.flush();return jsonOut({ok:true,state:sanitizeState(state)});
+  }finally{lock.releaseLock();}
 }
 
 function handleGetState(body) {
   const state = loadState();
   const user = requireUser(body.token, state);
   if (!user) return jsonOut({ok:false,error:"Сессия истекла. Войдите снова."});
-  return jsonOut({ok:true,state:sanitizeState(state)});
+  return jsonOut({ok:true,state:user.role==="trainee"?trainingStateForUser(state,user):sanitizeState(state)});
 }
 
 
@@ -546,15 +622,18 @@ function handleSaveProjectChecklist(body) {
   lock.waitLock(20000);
   try {
     const state = loadState();
+    if (!state || typeof state !== "object") return jsonOut({ok:false,error:"Общая база не загружена"});
+    state.clients = Array.isArray(state.clients) ? state.clients : [];
+
     const user = requireUser(body.token, state);
-    if (!user) return jsonOut({ok:false,error:"Сессия истекла"});
+    if (!user) return jsonOut({ok:false,error:"Сессия истекла. Войдите снова."});
 
     const projectId = String(body.projectId || "");
-    const project = (state.clients || []).find(function(p){return p.id===projectId;});
+    const project = state.clients.find(function(p){return String(p.id||"")===projectId;});
     if (!project) return jsonOut({ok:false,error:"Проект не найден"});
     if (project.deleted) return jsonOut({ok:false,error:"Проект находится в корзине"});
 
-    if (user.role === "manager" && project.managerId !== user.id) {
+    if (user.role === "manager" && String(project.managerId||"") !== String(user.id||"")) {
       return jsonOut({ok:false,error:"Нет доступа"});
     }
     if (["manager","admin","viewer"].indexOf(user.role) < 0) {
@@ -562,6 +641,7 @@ function handleSaveProjectChecklist(body) {
     }
 
     syncManagerTemplatesServer(state, project.managerId);
+
     project.theses = Array.isArray(project.theses) ? project.theses : [];
     project.blockChecks = Array.isArray(project.blockChecks) ? project.blockChecks : [];
     project.history = Array.isArray(project.history) ? project.history : [];
@@ -570,6 +650,7 @@ function handleSaveProjectChecklist(body) {
     (Array.isArray(body.theses) ? body.theses : []).forEach(function(x){
       thesisMap[String(x.id || "")] = x.done === true;
     });
+
     const blockMap = {};
     (Array.isArray(body.blocks) ? body.blocks : []).forEach(function(x){
       blockMap[String(x.id || "")] = x.done === true;
@@ -632,6 +713,8 @@ function handleSaveProjectChecklist(body) {
     SpreadsheetApp.flush();
 
     return jsonOut({ok:true,project:project});
+  } catch(err) {
+    return jsonOut({ok:false,error:"Ошибка сохранения проекта: "+String(err && err.message || err)});
   } finally {
     lock.releaseLock();
   }
@@ -869,7 +952,7 @@ function handleSaveState(body) {
         name:String(u.name || "").trim(),
         login:String(u.login || "").trim().toLowerCase(),
         passwordHash: rawPassword ? hashPassword(rawPassword) : (old ? old.passwordHash : ""),
-        role:["admin","manager","viewer"].indexOf(u.role) >= 0 ? u.role : "manager",
+        role:["admin","manager","viewer","trainee"].indexOf(u.role) >= 0 ? u.role : "manager",
         nick:String(u.nick || ""),
         avatar:String(u.avatar || ""),
         active:u.active !== false
@@ -1088,6 +1171,8 @@ function mirrorSheets(state) {
   if (!projectCommentsSheet) projectCommentsSheet = ss.insertSheet(PROJECT_COMMENTS_SHEET);
   let managerDataSheet = ss.getSheetByName(MANAGER_DATA_SHEET);
   if (!managerDataSheet) managerDataSheet = ss.insertSheet(MANAGER_DATA_SHEET);
+  let trainingSheet = ss.getSheetByName(TRAINING_SHEET);
+  if (!trainingSheet) trainingSheet = ss.insertSheet(TRAINING_SHEET);
 
   projects.clearContents();
   blocks.clearContents();
@@ -1096,6 +1181,7 @@ function mirrorSheets(state) {
   thesesSheet.clearContents();
   projectCommentsSheet.clearContents();
   managerDataSheet.clearContents();
+  trainingSheet.clearContents();
 
   const pRows = [[
     "№","Имя","Ник","Пол","Профессия","Менеджер","Дата начала",
@@ -1107,6 +1193,7 @@ function mirrorSheets(state) {
   const tRows = [["№ проекта","Имя","Этап","Тезис","Проговорен","Автор","Создан"]];
   const pcRows = [["№ проекта","Имя","Тип","Автор","Дата","Комментарий"]];
   const mdRows = [["Менеджер","Логин","Название шкалы","Стадии воронки","Кол-во тезисов","Кол-во блоков","Блокнот","Блокнот обновлён","Сообщение административных правок","Дата","Прочитано","Сообщение наблюдателя","Дата","Прочитано"]];
+  const trRows = [["Обучающийся","Логин","Материалов","Прочитано","Прогресс %","Последняя активность"]];
 
   (state.users || []).forEach(function(u){
     uRows.push([
@@ -1150,6 +1237,13 @@ function mirrorSheets(state) {
       o.sentAt || "",
       o.readAt ? "Да" : "Нет"
     ]);
+  });
+
+  state.trainingPrograms = state.trainingPrograms && typeof state.trainingPrograms==="object" ? state.trainingPrograms : {};
+  (state.users || []).filter(function(u){return u.role==="trainee";}).forEach(function(u){
+    const p=(state.trainingPrograms[u.id])||{files:[],readFileIds:[]},files=Array.isArray(p.files)?p.files:[],ids=(Array.isArray(p.readFileIds)?p.readFileIds:[]).map(String);
+    const done=files.filter(function(f){return ids.indexOf(String(f.id||""))>=0;}).length;
+    trRows.push([u.name||"",u.login||"",files.length,done,files.length?Math.round(done/files.length*100):0,p.lastActivityAt||""]);
   });
 
   (state.clients || []).forEach(function(p){
@@ -1233,6 +1327,7 @@ function mirrorSheets(state) {
   thesesSheet.getRange(1,1,tRows.length,tRows[0].length).setValues(tRows);
   projectCommentsSheet.getRange(1,1,pcRows.length,pcRows[0].length).setValues(pcRows);
   managerDataSheet.getRange(1,1,mdRows.length,mdRows[0].length).setValues(mdRows);
+  trainingSheet.getRange(1,1,trRows.length,trRows[0].length).setValues(trRows);
   projects.setFrozenRows(1);
   blocks.setFrozenRows(1);
   comments.setFrozenRows(1);
@@ -1240,6 +1335,7 @@ function mirrorSheets(state) {
   thesesSheet.setFrozenRows(1);
   projectCommentsSheet.setFrozenRows(1);
   managerDataSheet.setFrozenRows(1);
+  trainingSheet.setFrozenRows(1);
 }
 
 function sanitizeState(state) {
